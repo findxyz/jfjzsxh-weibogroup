@@ -1,0 +1,2635 @@
+# WeiboChatToWeChat — 微博群聊 → 微信
+
+## 这是什么
+
+把微博群聊消息搬到微信的工具。
+
+通过微博 WebIM API 抓取你加入的群聊消息，存入本地 SQLite+FTS5 数据库，
+然后通过 Hermes 在微信中聊天进行查阅、查看文件、搜索感兴趣内容等。
+
+举例：可以问「xx 今天说了什么」「xx 过去七天哪天说的消息最多」
+「某群最近在聊什么」，或直接搜某个关键词在哪些群里出现过。
+
+基于 Ubuntu（ARM64）开发测试。如果在 macOS 或其他系统上遇到问题，
+让自己的 hermes 解决问题进行适配。
+
+定位是「微博 → 微信」。如需发到其他平台，
+同样告诉你的 Hermes 进行适配。
+
+文档内容只是基础实现，你可以根据自己的需求同 Hermes 交流，修复可能存在的问题，
+或者让它在现有基础上拓展更多功能，比如根据消息内容自动汇总、
+定时推送特定话题、配合其他工具做自动化流程等。
+
+### 功能
+
+- 定时增量爬取群聊消息（默认每 10 分钟）
+- Playwright 自动打开微博登录页、截图二维码、通过 Hermes 发到微信扫码
+- SQLite + FTS5 存储，支持全文搜索
+- 图片/视频/文件下载，自动识别扩展名
+- 链接文件（PDF/ZIP/DOC 等）识别与下载
+- 群列表同步，可配置跳过指定群
+- 消息回填历史数据（可指定日期和单个群）
+- 盲测最早可爬取边界（最久两年，两年内是入群时间）
+
+## 工作原理
+
+项目不依赖外部服务，直接调用微博 WebIM 的 REST API。通过 Playwright 模拟浏览器
+登录获取包含 HttpOnly 的完整 cookie（含 SUB），之后所有 API 请求携带此 cookie。
+
+API 端点：
+- 群列表: api.weibo.com/webim/2/direct_messages/contacts.json
+- 消息:   api.weibo.com/webim/groupchat/query_messages.json
+- 登录:   api.weibo.com/chat
+
+消息翻页采用线段模型：每次拉取 50 条，用 max_mid 控制方向。
+首次部署自动回填到今天零点（CST），覆盖当天全部消息。后续运行只检查新消息。
+如需更早的历史，通过 --since 指定日期边界。
+
+## 目录结构
+
+```
+WeiboChatToWeChat/
+├── crawl.py            # CLI 入口
+├── pyproject.toml      # 项目配置 + 依赖
+├── weibo_im.db         # SQLite 数据库（运行时生成）
+├── media/              # 下载的图片/文件（运行时生成）
+└── weibo_im/
+    ├── __init__.py
+    ├── types.py         # 消息类型码定义
+    ├── parser.py        # API 消息解析
+    ├── db.py            # 数据库读写
+    ├── crawler.py       # 爬虫核心（API 调用 + 爬取逻辑）
+    ├── media.py         # 媒体文件下载
+    └── links.py         # 链接文件识别与下载
+```
+
+## 给 Hermes 的部署说明
+
+请按以下顺序执行：
+
+1. 询问用户要安装到哪个目录（例如 ~/Desktop/WeiboChatToWeChat 或自定义路径），如果用户不指定则用 WeiboChatToWeChat 作为目录名放在用户当前工作目录或桌面
+2. 创建该目录及子目录 weibo_im/
+3. 读取下文各「文件: xxx」代码块，将内容写入对应路径
+4. cd 到目标目录，运行 `uv sync` 安装依赖（需要系统已安装 uv）
+5. 配置 Playwright + Chromium 环境（仅 --renew-cookie 扫码续期需要）：
+   a. `uv run playwright install chromium`
+   b. `uv run python crawl.py --check-playwright`
+   c. 如果 --check-playwright 失败，根据当前系统环境自行解决 Playwright + Chromium 的安装和配置
+   d. 重复 b-c 直到 --check-playwright 返回 exit code 0（若系统确实无法安装配置，引导用户手动从浏览器中提取cookie发送）
+6. 运行 `uv run python crawl.py --renew-cookie` 引导用户扫码登录，首次扫码如果超时失败，询问用户是否扫码，若确定用户扫码了但没登陆成功，排查playwright部分代码问题进行修复（若简单修复还是无效，引导用户手动从浏览器中提取cookie发送）。
+7. 扫码成功后验证群列表，运行首次爬取：`uv run python crawl.py`（每个群默认回到今天午夜，爬取当天消息）
+8. 可选：设置定时任务每 10 分钟爬取（参考下面的定时任务说明）
+9. 提示用户部署完成
+10. 根据下方 ## SKILL.md 的内容为 Hermes 注册 skill。注册后此 txt 文件仅作参考，后续用户的 Hermes 应以项目目录中的实际代码为准进行判断和调整
+
+### 爬取行为说明
+
+`python crawl.py` 对数据库中没有记录的群会自动回填历史。
+首次爬取，默认回填到今天零点（CST），即只拉当天消息。已有记录的群只拉新消息。
+
+通过 `--since` 可以指定回填边界：
+- `python crawl.py --since 2026-01-01` — 回填到 2026 年元旦
+- `python crawl.py --since 2026-01-01 --gid 4761715839862414` — 只回填指定群
+
+回填停止条件为 API 返回空页或消息时间早于 since_time，无数量/页数上限，
+会持续翻页直到边界。
+
+如果需要回填全部历史，先用 `--probe-boundary` 获取最早消息时间，
+再将结果传给 `--since`。例如盲测得到最早消息为 2025-07-18，则：
+`python crawl.py --since 2025-07-18`
+
+注意：回填大量历史消息（如数月甚至更久）可能需要较长时间。
+Hermes 最后在后台运行此任务，跑完后进行通知，
+这样期间用户仍然可以正常跟 Hermes 聊天。
+
+### 定时任务设置
+
+如果用户使用 Hermes 的 cron 功能，以下为参考配置，由用户的 Hermes 根据实际系统环境调整：
+
+```
+hermes cron create \
+  --schedule 'every 10m' \
+  --script /path/to/weibo_crawl_wrapper.py \
+  --no-agent \
+  --deliver local \
+  --name 'weibo-im-crawl'
+```
+
+> 创建后执行 `uv run python crawl.py --set-cron-id <JOB_ID>` 将 cron job ID 存入数据库，供 `--renew-cookie` 自动恢复。
+
+weibo_crawl_wrapper.py 参考内容（由 Hermes 根据环境创建，不要照搬路径）：
+
+```python
+#!/usr/bin/env python3
+"""Weibo 爬取包装脚本 — 用于定时任务"""
+import subprocess, sys
+from pathlib import Path
+
+CRAWL_DIR = Path(__file__).parent
+
+result = subprocess.run(
+    ['uv', 'run', 'python', 'crawl.py'],
+    capture_output=True, text=True,
+    cwd=str(CRAWL_DIR),
+    timeout=120,
+)
+
+if result.returncode == 0:
+    print(result.stdout.strip())
+    sys.exit(0)
+
+error_text = (result.stderr or '') + (result.stdout or '')
+if 'Cookie 未设置' in error_text:
+    print(f"ERROR: cookie expired - run --renew-cookie", file=sys.stderr)
+else:
+    print(f'ERROR: {error_text[:500]}', file=sys.stderr)
+sys.exit(result.returncode)
+```
+
+### 常用命令
+
+```
+# 爬取新消息
+uv run python crawl.py
+
+# 下载所有 pending 媒体文件
+uv run python crawl.py --download
+
+# 下载指定文件
+uv run python crawl.py --download-fid 5302496155143676
+
+# 首次扫码登录
+uv run python crawl.py --renew-cookie
+
+# 只刷新群列表，不爬消息
+uv run python crawl.py --group-only
+
+# 保存 cron job ID（创建定时任务后执行，供 --renew-cookie 自动恢复）
+uv run python crawl.py --set-cron-id <JOB_ID_FROM_CRON_LIST>
+
+# 跳过某些群的爬取
+uv run python crawl.py --add-skip-gid 4988607601314774
+uv run python crawl.py --list-skip
+uv run python crawl.py --remove-skip-gid 4988607601314774
+
+# 回填到指定日期
+uv run python crawl.py --since 2026-01-01
+
+# 回填指定群到指定日期
+uv run python crawl.py --since 2026-01-21 --gid 4761715839862414
+
+# 盲测最早可爬取边界
+uv run python crawl.py --probe-boundary
+
+# 直接设置 cookie（手动方式）
+uv run python crawl.py --set-cookie 'SUB=xxx; SUBP=yyy'
+```
+
+### 环境要求
+
+- Linux/MacOS
+- Python >= 3.11
+- uv（包管理）
+- Playwright + Chromium（仅 --renew-cookie 扫码需要；部署时通过 --check-playwright 验证）
+- Hermes Agent（扫码通知聊天用）
+- 微博账号（需加入至少一个群聊）
+
+---
+
+## SKILL.md
+
+部署完成后，将下方内容注册为 skill。此后使用只需加载 skill 即可。
+
+```markdown
+---
+name: weibochat-to-wechat
+description: WeiboChatToWeChat — 微博群聊消息抓取，微信中查阅搜索
+---
+
+# WeiboChatToWeChat
+
+微博群聊消息 → 微信。抓取微博群聊到本地数据库，通过 Hermes 在微信中搜索查询。
+
+## 定制
+
+基于 Ubuntu（ARM64）开发测试。如在其他系统遇到问题，你的 Hermes 会自动适配。
+
+定位是「微博 → 微信」。如需发到其他平台，
+同样告诉你的 Hermes。
+
+## 部署
+
+初次部署由 WeiboChatToWeChat-hermes-deploy.txt 完成。部署后代码和数据库均在项目目录下。
+
+## 常用命令
+
+- `uv run python crawl.py` — 爬取新消息（首次入群默认回填当天消息）
+- `uv run python crawl.py --renew-cookie` — 扫码续期 cookie
+- `uv run python crawl.py --check-playwright` — 检查 Playwright + Chromium 环境是否就绪
+- `uv run python crawl.py --since 2026-01-01` — 回填到指定日期
+- `uv run python crawl.py --since 2026-01-01 --gid GID` — 只回填指定群
+- `uv run python crawl.py --group-only` — 只刷新群列表，不爬消息
+- `uv run python crawl.py --set-cron-id <JOB_ID>` — 保存定时任务 ID（供 --renew-cookie 恢复）
+- `uv run python crawl.py --list-skip` — 查看跳过的群
+- `uv run python crawl.py --add-skip-gid GID` — 跳过指定群
+- `uv run python crawl.py --remove-skip-gid GID` — 移除跳过
+- `uv run python crawl.py --probe-boundary` — 盲测最早可爬取边界（入群时间）
+- `uv run python crawl.py --probe-boundary --gid GID` — 测指定群的边界
+- `uv run python crawl.py --download` — 下载所有 pending 媒体文件
+- `uv run python crawl.py --download-fid FID` — 下载指定 fid 的媒体文件
+- `uv run python crawl.py --verbose` — 详细日志（调试用）
+- `uv run python crawl.py --set-cookie 'SUB=xxx; SUBP=yyy'` — 手动设置 cookie（不走扫码）
+- `uv run python crawl.py --db /path/to/custom.db` — 指定数据库路径
+
+## cookie 续期
+
+cookie 过期时需要重新设置。有两种方式：
+
+**自动扫码（推荐）：** `uv run python crawl.py --renew-cookie`
+Hermes 打开浏览器截图二维码发到微信，扫码后自动提取并存入数据库。
+如果已配置定时任务，续期成功后会**自动恢复**。
+
+**手动设置：** `uv run python crawl.py --set-cookie 'SUB=xxx; SUBP=yyy'`
+从浏览器 DevTools 手动复制 cookie 字符串，直接写入数据库，不需要 Playwright。
+
+## 媒体与链接文件
+
+爬取时不自动下载媒体——消息元数据（fid、url）写入 `media_files` 表，status 为 pending。
+通过 `--download` 批量下载所有 pending 文件，或 `--download-fid <fid>` 按需下载单个。
+同时可扫描近期消息中的外部链接，自动识别并下载 PDF、ZIP、DOC 等文件。
+
+## 数据存储
+
+所有数据均存储在项目目录下，不依赖外部服务：
+
+| 类型 | 位置 | 说明 |
+|------|------|------|
+| 数据库 | `weibo_im.db` | SQLite + FTS5，消息、群列表、cookie、配置等 |
+| 图片 | `media/images/` | 群聊图片 |
+| 视频 | `media/videos/` | 群聊视频（media_type 10/13） |
+| 文件 | `media/files/` | PDF、ZIP、DOC 等链接文件 |
+
+> **时区注意：** 消息的 `created_at` 字段是 UTC 毫秒时间戳。
+> `time.localtime()` 的行为取决于系统时区设置 — CST 系统直接返回北京时间，
+> UTC 系统返回 UTC 时间需手动 +8。查询前先确认系统时区，避免重复或遗漏转换。
+
+## 跳过不爬取的群
+
+不想爬取的群 GID 存储在数据库 config 表的 skip_gids 键中。
+通过 `--add-skip-gid` / `--remove-skip-gid` / `--list-skip` 管理。
+
+## 定时爬取
+
+推荐 Hermes cron 每 10 分钟运行一次，用 wrapper 脚本包装（参考部署包）。
+
+## 自进化说明
+
+部署完成后，代码文件已在项目目录中，可以直接修改。
+如果改了命令或新增功能，告诉 Hermes 同步更新已注册的 skill。
+此 txt 文件仅作首次部署参考，后续以实际代码为准。
+```
+
+---
+
+# 代码文件
+
+以下是项目完整源码。每个「文件: xxx」标记对应一个需要创建的文件。
+weibo_im/ 下的文件需要放到项目的 weibo_im/ 子目录中。
+
+### 文件: pyproject.toml
+```toml
+[project]
+name = "weibochat-to-wechat"
+version = "0.1.0"
+description = "微博群聊消息接收与存储"
+requires-python = ">=3.11"
+dependencies = [
+    "requests",
+    "urllib3",
+    "playwright",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+```
+
+### 文件: crawl.py
+```python
+#!/usr/bin/env python3
+"""
+微博群聊消息抓取 — 手动执行入口
+
+用法:
+    python crawl.py                                # 爬取新消息（不下载媒体）
+    python crawl.py --download                     # 下载所有 pending 媒体文件
+    python crawl.py --download-fid 5302496155143676  # 下载指定 fid 的媒体文件
+    python crawl.py --group-only                   # 只刷新群列表
+    python crawl.py --since 2026-01-01             # 回填到指定日期（不下载媒体）
+    python crawl.py --set-cookie 'SUB=xxx; SUBP=yyy'   # 首次设置 cookie
+    python crawl.py --probe-boundary                    # 盲测所有群最早边界
+    python crawl.py --probe-boundary --gid 4761715839862414  # 只测指定群
+    python crawl.py --renew-cookie                     # 打开浏览器扫码续期 cookie
+    python crawl.py --check-playwright                 # 检查 Playwright 环境就绪
+"""
+from __future__ import annotations
+
+import sys
+import argparse
+import logging
+import time
+import subprocess
+from datetime import datetime, timezone, timedelta
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+from weibo_im.crawler import Crawler
+
+CST = timezone(timedelta(hours=8))
+
+
+def _parse_since(value: str) -> int | None:
+    """解析 --since 参数: 日期字符串或毫秒时间戳，返回 ms"""
+    if not value:
+        return None
+    # 纯数字 → 时间戳
+    if value.isdigit() or (value.startswith("-") and value[1:].isdigit()):
+        return int(value)
+    # 日期字符串
+    for fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%Y/%m/%d"):
+        try:
+            dt = datetime.strptime(value, fmt)
+            return int(dt.replace(tzinfo=CST).timestamp() * 1000)
+        except ValueError:
+            continue
+    raise ValueError(f"无法解析日期: {value}（支持 2026-01-01 或毫秒时间戳）")
+
+
+def _check_playwright(log: logging.Logger) -> bool:
+    """检查 Playwright + Chromium 环境是否就绪。打印诊断信息，返回是否通过。"""
+    ok = True
+
+    # 第一层：Python 包
+    try:
+        from playwright.sync_api import sync_playwright  # noqa: F811
+        log.info("✅ playwright Python 包可导入")
+    except ImportError:
+        log.error("❌ playwright Python 包未安装（当前解释器: %s）", sys.executable)
+        log.error("   → uv add playwright && uv run playwright install chromium")
+        return False
+
+    # 第二层：浏览器能启动
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True, args=["--no-sandbox"])
+            browser.close()
+        log.info("✅ Chromium 启动正常")
+    except Exception as e:
+        log.error("❌ Chromium 启动失败: %s", str(e).split("\n")[0])
+        ok = False
+
+    return ok
+
+
+def _notify_weixin(msg: str, log: logging.Logger):
+    """发送消息到微信，失败时打 warning 但不中断"""
+    r = subprocess.run(
+        ["hermes", "send", "--to", "weixin", msg],
+        capture_output=True, text=True,
+    )
+    if r.returncode == 0:
+        log.info("已发送到微信")
+    else:
+        log.warning("发送到微信失败 (rc=%d): %s", r.returncode, (r.stderr or "").strip()[:200])
+
+
+def _renew_cookie(db_path: str, log: logging.Logger):
+    """用 Playwright 打开 api.weibo.com/chat → 截图发微信 → 等你扫码 → 存 cookie"""
+    if not _check_playwright(log):
+        log.error("请先解决以上问题后重试: uv run python crawl.py --renew-cookie")
+        sys.exit(1)
+
+    from playwright.sync_api import sync_playwright  # noqa: F811
+
+    qrcode_path = "/tmp/weibo_chat_qrcode.png"
+
+    with sync_playwright() as pw:
+        # 启动浏览器（无头模式截图二维码）
+        browser = pw.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-setuid-sandbox"],
+        )
+        try:
+            ctx = browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"
+                ),
+                viewport={"width": 1280, "height": 720},
+                locale="zh-CN",
+            )
+            page = ctx.new_page()
+
+            log.info("打开 api.weibo.com/chat ...")
+            page.goto("https://api.weibo.com/chat", wait_until="domcontentloaded", timeout=30000)
+            time.sleep(3)
+
+            # 判断是否已登录（用 JS 读 location.href，page.url 检测不到 hash 路由）
+            current_href = page.evaluate("window.location.href")
+            log.info("当前 URL: %s", current_href)
+
+            if "#/chat" in current_href:
+                log.info("已有有效 cookie，直接提取")
+            else:
+                # 截图发微信
+                page.screenshot(path=qrcode_path)
+                log.info("二维码已截图 -> /tmp/weibo_chat_qrcode.png")
+                _notify_weixin(
+                    "📱 请用微博 APP 扫码登录\nMEDIA:" + qrcode_path,
+                    log,
+                )
+                log.info("等待扫码...")
+
+                for i in range(120):
+                    time.sleep(1)
+                    try:
+                        current = page.evaluate("window.location.href")
+                        if current != current_href:
+                            log.info("检测到页面跳转: %s → %s", current_href, current)
+                            _notify_weixin("🔍 检测到扫码登录，正在处理...", log)
+                            try:
+                                page.wait_for_load_state("networkidle", timeout=15000)
+                            except Exception:
+                                pass
+                            time.sleep(3)
+                            break
+                    except Exception:
+                        break
+                else:
+                    log.error("扫码超时（120 秒），最终 URL: %s", page.url)
+                    _notify_weixin("⏰ 扫码超时（120s）或者失败，如需重新登录请告诉我", log)
+                    sys.exit(1)
+
+            # 只拿 .weibo.com 域名的 cookie，直接存
+            raw_cookies = ctx.cookies()
+            deduped: dict[str, str] = {}
+            for c in raw_cookies:
+                domain = c.get("domain", "")
+                if not domain.endswith(".weibo.com") and domain != "weibo.com":
+                    continue
+                deduped[c["name"]] = c["value"]
+
+            cookie_str = "; ".join(f"{k}={v}" for k, v in sorted(deduped.items()))
+        finally: 
+            browser.close()
+
+    # 存入数据库
+    from weibo_im.db import set_db_path, init_db, set_cookie
+    set_db_path(db_path)
+    init_db()
+    set_cookie(cookie_str)
+    log.info("Cookie 已存入数据库")
+    _notify_weixin("✅ 已登录，Cookie 已存入", log)
+
+    # 验证爬取
+    log.info("验证新 cookie ...")
+    crawler = Crawler(db_path)
+    groups = crawler.sync_groups()
+    log.info("验证通过: 群列表 %d 个群", len(groups))
+    _notify_weixin(f"💬 成功获取到微博聊天信息，可进行查阅", log)
+
+    # 恢复定时任务 — 从 config 表读取 job_id
+    try:
+        from weibo_im.db import get_config
+        JOB_ID = get_config("cron_job_id", "")
+        if JOB_ID:
+            r = subprocess.run(
+                ["hermes", "cron", "resume", JOB_ID],
+                capture_output=True, text=True, timeout=30,
+            )
+            if r.returncode == 0:
+                log.info("定时任务已恢复")
+            else:
+                log.warning("恢复定时任务失败: %s", r.stderr.strip())
+        else:
+            log.info("未配置定时任务 ID，跳过恢复（可用 `hermes cron list` 查看后设置）")
+    except Exception as e:
+        log.warning("恢复定时任务异常: %s", e)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="微博群聊消息抓取")
+    parser.add_argument("--db", default="", help="数据库路径（默认 Weibo-ChatClient/weibo_im.db）")
+    parser.add_argument("--download", action="store_true", help="下载所有 pending 媒体文件")
+    parser.add_argument("--download-fid", default="", help="下载指定 fid 的媒体文件")
+    parser.add_argument("--since", default="", help="回填起始日期（如 2026-01-01）或时间戳(ms)，0=全部历史")
+    parser.add_argument("--group-only", action="store_true", help="只刷新群列表，不爬消息")
+    parser.add_argument("--set-cookie", default="", help="设置 cookie 到数据库后退出")
+    parser.add_argument("--renew-cookie", action="store_true", help="打开浏览器扫码续期 cookie")
+    parser.add_argument("--check-playwright", action="store_true",
+                        help="检查 Playwright + Chromium 环境是否就绪（部署前验证）")
+    parser.add_argument("--verbose", action="store_true", help="详细日志")
+    parser.add_argument("--probe-boundary", action="store_true",
+                        help="盲测群聊最早可爬取边界（入群时间）")
+    parser.add_argument("--gid", type=int, default=0,
+                        help="指定群 gid（与 --probe-boundary 或 --since 配合，缺省则爬所有群）")
+    parser.add_argument("--add-skip-gid", type=int, default=0,
+                        help="将指定 gid 加入不爬取列表")
+    parser.add_argument("--remove-skip-gid", type=int, default=0,
+                        help="从不爬取列表中移除指定 gid")
+    parser.add_argument("--list-skip", action="store_true",
+                        help="列出当前不爬取的群")
+    parser.add_argument("--set-cron-id", default="",
+                        help="保存 cron job ID 到数据库（供 --renew-cookie 恢复使用）")
+    args = parser.parse_args()
+
+    level = logging.DEBUG if args.verbose else logging.INFO
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
+    log = logging.getLogger("crawl")
+
+    db_path = args.db or str(Path(__file__).parent / "weibo_im.db")
+    db_path = str(Path(db_path).expanduser())
+    log.info("数据库: %s", db_path)
+
+    # --renew-cookie: 打开浏览器扫码续期
+    if args.renew_cookie:
+        _renew_cookie(db_path, log)
+        return
+
+    # --check-playwright: 验证 Playwright + Chromium 环境
+    if args.check_playwright:
+        ok = _check_playwright(log)
+        sys.exit(0 if ok else 1)
+
+    # --set-cookie: 写入 DB 后直接退出
+    if args.set_cookie:
+        from weibo_im.db import set_db_path, init_db, set_cookie
+        set_db_path(db_path)
+        init_db()
+        set_cookie(args.set_cookie)
+        log.info("Cookie 已存入数据库")
+        return
+
+    # --set-cron-id: 保存 cron job ID
+    if args.set_cron_id:
+        from weibo_im.db import set_db_path, init_db, set_config
+        set_db_path(db_path)
+        init_db()
+        set_config("cron_job_id", args.set_cron_id)
+        log.info("Cron job ID 已保存: %s", args.set_cron_id)
+        return
+
+    # 设置 skip_gids 相关
+    from weibo_im.db import set_db_path, init_db, get_skip_gids, add_skip_gid, remove_skip_gid
+    set_db_path(db_path)
+    init_db()
+
+    if args.list_skip:
+        gids = get_skip_gids()
+        if not gids:
+            log.info("当前没有不爬取的群")
+            return
+        # 查 groups 表获取群名
+        import sqlite3
+        conn = sqlite3.connect(db_path)
+        names = dict(conn.execute("SELECT gid, name FROM groups").fetchall())
+        conn.close()
+        log.info("不爬取的群（%d 个）:", len(gids))
+        for gid in sorted(gids):
+            name = names.get(gid, "未知群")
+            log.info("  %20d  %s", gid, name)
+        return
+
+    if args.add_skip_gid:
+        add_skip_gid(args.add_skip_gid)
+        log.info("已将 gid=%d 加入不爬取列表", args.add_skip_gid)
+        return
+
+    if args.remove_skip_gid:
+        remove_skip_gid(args.remove_skip_gid)
+        log.info("已将 gid=%d 从不爬取列表中移除", args.remove_skip_gid)
+        return
+
+    try:
+        crawler = Crawler(db_path)
+    except RuntimeError as e:
+        log.error("Cookie 未设置: %s", e)
+        _notify_weixin("⚠️ 微博 cookie 可能失效，需要扫码登录续期，方便时告诉我", log)
+        return
+
+    # --download-fid: 下载单个媒体文件
+    if args.download_fid:
+        result = crawler.download_fid(args.download_fid)
+        if "error" in result:
+            log.error(result["error"])
+        elif result.get("status") == "already_done":
+            log.info("已下载: %s", result["local_path"])
+        elif result["status"] == "done":
+            log.info("下载完成: %s (%d bytes)", result["local_path"], result["file_size"])
+        else:
+            log.error("下载失败: fid=%s", args.download_fid)
+        return
+
+    # --download: 下载所有 pending 媒体文件
+    if args.download:
+        log.info("下载所有 pending 媒体文件...")
+        crawler.download_all_media()
+        stats = crawler.stats()
+        log.info("媒体统计: %d done, %d pending, %d failed",
+                 stats["media_done"], stats["media_pending"], stats["media_failed"])
+        return
+
+    # --probe-boundary: 盲测最早边界
+    if args.probe_boundary:
+        log.info("盲测最早可爬取边界...")
+        groups = crawler.sync_groups()
+        targets = [g for g in groups if args.gid == 0 or g["gid"] == args.gid]
+        if not targets:
+            log.warning("没有匹配的群")
+            return
+        for g in targets:
+            log.info("→ [%s] gid=%d", g["name"], g["gid"])
+            boundary = crawler.probe_boundary(g["gid"], g["name"])
+            if boundary.get("error"):
+                log.warning("  ✗ %s", boundary["error"])
+        return
+
+    if args.group_only:
+        groups = crawler.sync_groups()
+        log.info("群列表已刷新: %d 个群", len(groups))
+        return
+
+    # 解析 --since 参数
+    since_time: int | None = None
+    if args.since:
+        since_time = _parse_since(args.since)
+        log.info("回填起始: %s (%d)", args.since, since_time)
+
+    # 常规模式：爬取所有群新消息
+    try:
+        result = crawler.crawl_all(download_media=False,
+                                   since_time=since_time,
+                                   gid=args.gid)
+    except Exception as e:
+        log.error("爬取失败: %s", e)
+        _notify_weixin("⚠️ 微博 cookie 可能失效，需要扫码登录续期，方便时告诉我", log)
+        return
+
+    log.info("爬取完成: %d 个群, %d 个有新消息, +%d 条, %d 个媒体文件待下载",
+             result["groups"], result["groups_with_new"],
+             result["new_messages"], result["media_pending"])
+
+    stats = crawler.stats()
+    log.info("数据库统计: %d 条消息, %d 个群, %d 个媒体已下载",
+             stats["messages"], stats["groups_with_msgs"], stats["media_done"])
+
+
+if __name__ == "__main__":
+    main()
+```
+
+### 文件: weibo_im/__init__.py
+```python
+"""微博群聊消息抓取"""
+```
+
+### 文件: weibo_im/types.py
+```python
+"""
+消息类型定义 — 从实际数据库中分析归纳
+"""
+from __future__ import annotations
+
+# ── 消息类型码 (msg_type) ──────────────────────────────────
+# 对应 API 响应中的 type 字段 (REST API) / info.type 字段 (CometD)
+
+MSG_TYPES: dict[int, tuple[str, str]] = {
+    100: ("weibo_share",      "微博分享"),
+    320: ("invite",           "邀请入群"),
+    321: ("normal",           "普通消息"),
+    322: ("join",             "新人入群"),
+    323: ("leave",            "退群"),
+    324: ("kick",             "被踢出群"),
+    325: ("rename",           "群名修改"),
+    327: ("transfer",         "群主转让"),
+    331: ("recall",           "消息撤回"),
+    332: ("sync",             "协议同步"),   # 心跳包，无用户内容
+    333: ("silent_change",    "免打扰变更"),
+    335: ("group_update",     "群信息更新"),
+    337: ("admin_change",     "管理员变更"),
+    421: ("join_request",     "入群申请"),
+    429: ("removed",          "被移出群"),
+    499: ("notice",           "群通知"),
+    9999: ("attitude",        "态度更新"),
+}
+
+# 需要跳过（无用户消息内容）
+SKIP_TYPES = {332, 9999}
+
+# ── 媒体类型 (media_type) ──────────────────────────────────
+
+MEDIA_TYPES: dict[int, tuple[str, str]] = {
+    0:  ("text",           "纯文本"),
+    1:  ("image",          "图片"),
+    4:  ("unknown_4",      "未知-4"),
+    5:  ("file",           "文件"),     # PDF/DOC/ZIP 等附件
+    9:  ("unknown_9",      "未知-9"),
+    10: ("video",          "视频"),     # media_type=10 也是视频
+    11: ("unknown_11",     "未知-11"),
+    13: ("video_or_rp",    "视频/红包"),
+    14: ("link",           "链接/卡片分享"),
+    15: ("miniprogram",    "小程序卡片"),
+}
+
+# ── 工具函数 ────────────────────────────────────────────────
+
+
+def msg_type_name(code: int) -> str:
+    return MSG_TYPES.get(code, ("unknown", f"未知({code})"))[1]
+
+
+def msg_type_slug(code: int) -> str:
+    return MSG_TYPES.get(code, ("unknown", "未知"))[0]
+
+
+def media_type_name(code: int) -> str:
+    return MEDIA_TYPES.get(code, ("unknown", f"未知({code})"))[1]
+
+
+def is_redpacket(msg: dict) -> bool:
+    """media_type=13 时判断是否红包"""
+    content = msg.get("content", "")
+    return "收到红包消息" in content
+```
+
+### 文件: weibo_im/parser.py
+```python
+"""消息解析 — 将 API 原始消息解析为统一格式
+
+支持两种来源：
+  1. REST API (query_messages.json) — 主处理路径
+  2. CometD 推送 (channel /im/) — 保留兼容
+"""
+from __future__ import annotations
+
+import json
+import hashlib
+import logging
+from typing import Any
+
+from .types import (
+    MSG_TYPES, SKIP_TYPES, msg_type_name, media_type_name, is_redpacket,
+)
+
+log = logging.getLogger("weibo_im.parser")
+
+
+def resolve_fid(raw: dict, info: dict) -> str | None:
+    """从消息中提取文件 ID（fid）"""
+    fids = info.get("fids") or raw.get("fids") or []
+    if isinstance(fids, list) and fids:
+        return str(fids[0])
+    # 一些消息把 fid 直接放在顶层
+    fid = info.get("fid") or raw.get("fid") or ""
+    return str(fid) if fid else None
+
+
+def resolve_media_orig_url(fid: str, media_type: int, source: str = "209678993") -> str:
+    """fid 转 upload API URL"""
+    base = f"https://upload.api.weibo.com/2/mss/msget?fid={fid}&source={source}"
+    if media_type == 1:  # 图片
+        return f"{base}&imageType=origin"
+    return base
+
+
+def extract_pic_infos(raw: dict, info: dict) -> list[dict]:
+    """提取小程序/卡片中的 pic_infos"""
+    pi = info.get("pic_infos") or raw.get("pic_infos")
+    if pi:
+        if isinstance(pi, list):
+            return pi
+        if isinstance(pi, dict):
+            return [pi]
+    return []
+
+
+def extract_url_objects(raw: dict, info: dict) -> list[dict]:
+    """提取 url_objects"""
+    uo = info.get("url_objects") or raw.get("url_objects")
+    if isinstance(uo, list):
+        return uo
+    return []
+
+
+def extract_template_data(info: dict) -> dict:
+    """提取系统消息模板变量"""
+    data = {}
+    # 模板变量如 {{name.DATA}}, {{userA.DATA}}, {{operator.DATA}}
+    d = info.get("data")
+    if isinstance(d, dict):
+        for k, v in d.items():
+            if isinstance(v, dict):
+                data[k] = {
+                    "value": v.get("value", ""),
+                    "scheme": v.get("scheme", ""),
+                    "color": v.get("color", ""),
+                }
+            else:
+                data[k] = v
+    return data
+
+
+def extract_attitude_data(info: dict) -> dict:
+    """提取态度/点赞数据 (msg_type=9999)"""
+    d = info.get("data", {})
+    if isinstance(d, dict) and "attitudes" in d:
+        return {
+            "mid": d.get("mid", ""),
+            "attitudes": d.get("attitudes", []),
+            "users": d.get("users", {}),
+        }
+    att = info.get("attitude_info")
+    if att:
+        return att
+    return {}
+
+
+def extract_recall_data(info: dict) -> dict:
+    """提取撤回信息 (msg_type=331)"""
+    ids = info.get("ids") or []
+    return {
+        "mids": [str(i) for i in ids] if isinstance(ids, list) else [str(ids)],
+        "recall_by": info.get("recall_sender_name", ""),
+    }
+
+
+def extract_annotations(info: dict) -> dict:
+    ann = info.get("annotations", info.get("ext_text", {}))
+    if isinstance(ann, dict):
+        return ann
+    return {}
+
+
+# ── 主解析函数 ──────────────────────────────────────────────
+
+
+def parse_message(raw: dict, default_gid: int | None = None) -> dict | None:
+    """将 API 原始消息解析为统一字典格式。
+
+    Args:
+        raw: API 返回的原始消息字典
+        default_gid: 如果消息没有 gid 时的默认值
+
+    Returns:
+        解析后的消息字典，或 None（应跳过的消息）
+    """
+    info = raw.get("info", {})
+    # 兼容 REST API 直接平铺的格式
+    # REST API: msg={type, content, from_user, ...} 无 info 包装
+    # CometD:   msg={type, sub_type, info={...}}
+    is_cometd = bool(info)
+
+    # ── 类型 ─────────────────────────────────────────────
+    if is_cometd:
+        # CometD 推送：顶层 type = "groupchat"/"msg"
+        # sub_type = 具体消息码，可能在顶层或在 info.type
+        msg_type = raw.get("sub_type") or info.get("type", 321)
+    else:
+        # REST API：type = 消息码
+        msg_type = raw.get("type", 321)
+    msg_type = int(msg_type)
+
+    if msg_type in SKIP_TYPES:
+        return None
+
+    # ── 发送者 ────────────────────────────────────────────
+    from_user = info.get("from_user") or raw.get("from_user", {})
+    if isinstance(from_user, dict):
+        sender_id = int(from_user.get("id", info.get("from_uid", raw.get("from_uid", 0))) or 0)
+        sender_name = from_user.get("screen_name", "")
+    else:
+        sender_id = int(info.get("from_uid", raw.get("from_uid", 0)))
+        sender_name = ""
+
+    # ── 内容 ─────────────────────────────────────────────
+    content = info.get("content") or raw.get("content", "")
+    text = str(content) if content else ""
+
+    # ── 媒体类型 ──────────────────────────────────────────
+    media_type = int(info.get("media_type") or raw.get("media_type", 0))
+
+    # 区分视频和红包
+    if media_type == 13 and is_redpacket(raw):
+        media_type = 16  # 自定义：红包
+
+    # ── 文件 ──────────────────────────────────────────────
+    fid = resolve_fid(raw, info)
+    media_orig_url = ""
+    if fid:
+        media_orig_url = resolve_media_orig_url(fid, media_type)
+
+    # 对于 media_type=14, url_objects 中可能含 pic_ids
+    # 也用 fids，但有的分享用 url_objects.status.pic_ids
+    # 这里仅提取顶层 fids
+
+    # ── 结构化数据 ────────────────────────────────────────
+    url_objects = json.dumps(extract_url_objects(raw, info), ensure_ascii=False)
+    pic_infos = json.dumps(extract_pic_infos(raw, info), ensure_ascii=False)
+
+    template = info.get("template", "")
+    template_data = json.dumps(extract_template_data(info), ensure_ascii=False)
+
+    recall_data = extract_recall_data(info) if msg_type == 331 else {}
+    recall_mids = json.dumps(recall_data.get("mids", []), ensure_ascii=False)
+    recall_by = recall_data.get("recall_by", from_user.get("screen_name", ""))
+
+    attitude_data = json.dumps(extract_attitude_data(info), ensure_ascii=False)
+
+    # ── 元信息 ────────────────────────────────────────────
+    gid = int(info.get("gid") or raw.get("gid", default_gid or 0))
+    mid = str(info.get("id") or raw.get("id") or info.get("current_version") or "")
+    if not mid and msg_type == 331:
+        mid = str(info.get("time", raw.get("time", 0)))
+    if not mid:
+        return None
+
+    group_name = info.get("group_name", "")
+    faith_status = int(info.get("faith_status", 0) or 0)
+    faith_icon = info.get("faith_icon", "")
+    annotations = json.dumps(extract_annotations(info), ensure_ascii=False)
+
+    created_at = info.get("time") or raw.get("time", 0)
+    if isinstance(created_at, str):
+        created_at = 0
+    created_at = int(created_at)
+    if created_at and created_at < 1_000_000_000_000:
+        created_at = created_at * 1000
+
+    # ── raw_json ──────────────────────────────────────────
+    # 对 CometD 推送保留完整 info
+    raw_json = json.dumps(raw, ensure_ascii=False)
+
+    return {
+        "mid": mid,
+        "gid": gid,
+        "msg_type": msg_type,
+        "msg_type_name": msg_type_name(msg_type),
+        "media_type": media_type,
+        "sender_id": sender_id,
+        "sender_name": sender_name,
+        "text": text,
+        "fid": fid or "",
+        "media_orig_url": media_orig_url,
+        "media_local_path": "",
+        "url_objects": url_objects,
+        "pic_infos": pic_infos,
+        "template": template,
+        "template_data": template_data,
+        "recall_mids": recall_mids,
+        "recall_by": recall_by,
+        "attitude_data": attitude_data,
+        "faith_status": faith_status,
+        "faith_icon": faith_icon,
+        "group_name": group_name,
+        "annotations": annotations,
+        "created_at": created_at,
+        "raw_json": raw_json,
+    }
+
+
+def parse_messages(messages: list[dict], default_gid: int | None = None) -> list[dict]:
+    """批量解析消息列表"""
+    result = []
+    for raw in messages:
+        try:
+            pm = parse_message(raw, default_gid)
+            if pm:
+                result.append(pm)
+        except Exception as e:
+            log.warning("parse_message error: %s | raw=%s...", e,
+                        json.dumps(raw, ensure_ascii=False)[:200])
+    return result
+```
+
+### 文件: weibo_im/db.py
+```python
+"""数据库设计 — SQLite + FTS5"""
+from __future__ import annotations
+
+import json
+import time
+import logging
+import sqlite3
+import threading
+from typing import Any
+
+from .types import (
+    msg_type_name, msg_type_slug, media_type_name, is_redpacket,
+)
+
+log = logging.getLogger("weibo_im.db")
+
+_local = threading.local()
+_DB_PATH: str | None = None
+
+
+def set_db_path(path: str):
+    global _DB_PATH
+    _DB_PATH = str(path)
+
+
+def get_conn() -> sqlite3.Connection:
+    if not hasattr(_local, "conn") or _local.conn is None:
+        if not _DB_PATH:
+            raise RuntimeError("DB path not set")
+        conn = sqlite3.connect(_DB_PATH)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        _local.conn = conn
+    return _local.conn
+
+
+def _ensure_group_mid_columns(conn):
+    """为已有 groups 表补 min_mid/max_mid 列"""
+    cols = set(r[1] for r in conn.execute("PRAGMA table_info(groups)").fetchall())
+    if "min_mid" not in cols:
+        conn.execute("ALTER TABLE groups ADD COLUMN min_mid TEXT DEFAULT ''")
+    if "max_mid" not in cols:
+        conn.execute("ALTER TABLE groups ADD COLUMN max_mid TEXT DEFAULT ''")
+    conn.commit()
+
+
+def init_db():
+    conn = get_conn()
+
+    # 补 mid 范围列
+    _ensure_group_mid_columns(conn)
+    conn.executescript(f"""
+        -- ── 配置表（key-value 存储，如 cookie）─────────────
+        CREATE TABLE IF NOT EXISTS config (
+            key        TEXT PRIMARY KEY,
+            value      TEXT NOT NULL DEFAULT '',
+            updated_at INTEGER NOT NULL DEFAULT 0
+        );
+
+        -- ── 群聊列表 ─────────────────────────────────────
+        CREATE TABLE IF NOT EXISTS groups (
+            gid            INTEGER PRIMARY KEY,
+            name           TEXT NOT NULL DEFAULT '',
+            avatar         TEXT DEFAULT '',
+            round_avatar   TEXT DEFAULT '',
+            member_count   INTEGER DEFAULT 0,
+            max_member     INTEGER DEFAULT 0,
+            owner_id       INTEGER DEFAULT 0,
+            admins         TEXT DEFAULT '[]',
+            summary        TEXT DEFAULT '',
+            group_type     INTEGER DEFAULT 0,
+            super_group_type INTEGER DEFAULT 0,
+            status         INTEGER DEFAULT 0,
+            validate_type  INTEGER DEFAULT 0,
+            raw_json       TEXT DEFAULT '',
+            created_at     INTEGER DEFAULT 0,   -- ms
+            updated_at     INTEGER DEFAULT 0,
+            min_mid        TEXT DEFAULT '',      -- 已存的最旧消息 mid
+            max_mid        TEXT DEFAULT ''       -- 已存的最新消息 mid
+        );
+
+        -- ── 消息表 ───────────────────────────────────────
+        CREATE TABLE IF NOT EXISTS messages (
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            mid              TEXT NOT NULL UNIQUE,
+            gid              INTEGER NOT NULL,
+
+            -- 类型
+            msg_type         INTEGER NOT NULL DEFAULT 321,
+            msg_type_name    TEXT NOT NULL DEFAULT '',
+            media_type       INTEGER DEFAULT 0,
+
+            -- 发送者
+            sender_id        INTEGER NOT NULL DEFAULT 0,
+            sender_name      TEXT DEFAULT '',
+
+            -- 文本内容
+            text             TEXT DEFAULT '',
+
+            -- 文件
+            fid              TEXT DEFAULT '',      -- fids[0] 文件 ID
+            media_orig_url   TEXT DEFAULT '',      -- 文件原始 URL
+            media_local_path TEXT DEFAULT '',      -- 下载后的本地路径
+
+            -- 结构化数据
+            url_objects      TEXT DEFAULT '',      -- JSON: 卡片分享链接
+            pic_infos        TEXT DEFAULT '',      -- JSON: 小程序图片
+            template         TEXT DEFAULT '',      -- 系统消息模板文本
+            template_data    TEXT DEFAULT '{{}}',  -- JSON: 模板变量
+            recall_mids      TEXT DEFAULT '[]',    -- JSON: 被撤回的消息ID列表
+            recall_by        TEXT DEFAULT '',      -- 撤回者
+            attitude_data    TEXT DEFAULT '{{}}',  -- JSON: 点赞数据
+
+            -- 元信息
+            faith_status     INTEGER DEFAULT 0,
+            faith_icon       TEXT DEFAULT '',
+            group_name       TEXT DEFAULT '',
+            annotations      TEXT DEFAULT '{{}}',  -- JSON
+
+            -- 时间
+            created_at       INTEGER NOT NULL,     -- 消息时间(ms)
+            saved_at         INTEGER NOT NULL,     -- 入库时间(ms)
+
+            -- 原始数据
+            raw_json         TEXT DEFAULT ''
+        );
+
+        -- ── 已下载媒体文件 ───────────────────────────────
+        CREATE TABLE IF NOT EXISTS media_files (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            fid             TEXT NOT NULL,
+            gid             INTEGER DEFAULT 0,
+            mid             TEXT DEFAULT '',
+            media_type      INTEGER DEFAULT 0,
+            orig_url        TEXT DEFAULT '',
+            local_path      TEXT DEFAULT '',
+            file_size       INTEGER DEFAULT 0,
+            width           INTEGER DEFAULT 0,
+            height          INTEGER DEFAULT 0,
+            md5             TEXT DEFAULT '',
+            status          TEXT DEFAULT 'pending',  -- pending/done/failed
+            downloaded_at   INTEGER DEFAULT 0,
+            created_at      INTEGER NOT NULL,
+            UNIQUE(fid)
+        );
+
+        -- 索引
+        CREATE INDEX IF NOT EXISTS idx_msg_gid   ON messages(gid);
+        CREATE INDEX IF NOT EXISTS idx_msg_mtype ON messages(msg_type);
+        CREATE INDEX IF NOT EXISTS idx_msg_ctime ON messages(created_at);
+        CREATE INDEX IF NOT EXISTS idx_msg_mid   ON messages(mid);
+        CREATE INDEX IF NOT EXISTS idx_msg_fid   ON messages(fid);
+        CREATE INDEX IF NOT EXISTS idx_mf_fid    ON media_files(fid);
+        CREATE INDEX IF NOT EXISTS idx_mf_status ON media_files(status);
+
+        -- FTS5 全文搜索
+        CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+            text, sender_name, group_name,
+            content='messages', content_rowid='id'
+        );
+
+        -- 触发器自动同步 FTS
+        CREATE TRIGGER IF NOT EXISTS msg_ai AFTER INSERT ON messages BEGIN
+            INSERT INTO messages_fts(rowid, text, sender_name, group_name)
+            VALUES (new.id, new.text, new.sender_name, new.group_name);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS msg_ad AFTER DELETE ON messages BEGIN
+            INSERT INTO messages_fts(messages_fts, rowid, text, sender_name, group_name)
+            VALUES ('delete', old.id, old.text, old.sender_name, old.group_name);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS msg_au AFTER UPDATE ON messages BEGIN
+            INSERT INTO messages_fts(messages_fts, rowid, text, sender_name, group_name)
+            VALUES ('delete', old.id, old.text, old.sender_name, old.group_name);
+            INSERT INTO messages_fts(rowid, text, sender_name, group_name)
+            VALUES (new.id, new.text, new.sender_name, new.group_name);
+        END;
+    """)
+    conn.commit()
+
+
+# ── 配置读写 ──────────────────────────────────────────────
+
+
+def get_config(key: str, default: str = "") -> str:
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT value FROM config WHERE key=?", (key,)
+    ).fetchone()
+    return row[0] if row else default
+
+
+def set_config(key: str, value: str):
+    conn = get_conn()
+    now = int(time.time() * 1000)
+    conn.execute("""
+        INSERT INTO config (key, value, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
+    """, (key, value, now))
+    conn.commit()
+
+
+# ── cookie ────────────────────────────────────────────────
+
+
+def get_cookie() -> str:
+    return get_config("weibo_cookie", "")
+
+
+def set_cookie(cookie: str):
+    set_config("weibo_cookie", cookie)
+
+
+def get_skip_gids() -> set[int]:
+    """从 config 表读取跳过爬取的群 GID 集合"""
+    raw = get_config("skip_gids", "")
+    if not raw:
+        return set()
+    return {int(x) for x in raw.split(",") if x.strip()}
+
+
+def set_skip_gids(gids: set[int]):
+    """将跳过爬取的群 GID 集合写入 config 表"""
+    value = ",".join(str(g) for g in sorted(gids))
+    set_config("skip_gids", value)
+
+
+def add_skip_gid(gid: int):
+    """添加一个 GID 到跳过列表"""
+    gids = get_skip_gids()
+    gids.add(gid)
+    set_skip_gids(gids)
+
+
+def remove_skip_gid(gid: int):
+    """从跳过列表移除一个 GID"""
+    gids = get_skip_gids()
+    gids.discard(gid)
+    set_skip_gids(gids)
+
+
+# ── 写入 ──────────────────────────────────────────────────
+
+
+def save_groups(groups: list[dict]) -> int:
+    """批量写入/更新群信息，返回处理条数"""
+    conn = get_conn()
+    now = int(time.time() * 1000)
+    count = 0
+    for g in groups:
+        conn.execute("""
+            INSERT INTO groups
+                (gid, name, avatar, round_avatar, member_count, max_member,
+                 owner_id, admins, summary, group_type, super_group_type,
+                 status, validate_type, raw_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(gid) DO UPDATE SET
+                name=excluded.name,
+                avatar=COALESCE(excluded.avatar, groups.avatar),
+                round_avatar=COALESCE(excluded.round_avatar, groups.round_avatar),
+                member_count=COALESCE(excluded.member_count, groups.member_count),
+                max_member=COALESCE(excluded.max_member, groups.max_member),
+                owner_id=COALESCE(excluded.owner_id, groups.owner_id),
+                admins=COALESCE(excluded.admins, groups.admins),
+                summary=COALESCE(excluded.summary, groups.summary),
+                group_type=COALESCE(excluded.group_type, groups.group_type),
+                super_group_type=COALESCE(excluded.super_group_type, groups.super_group_type),
+                status=COALESCE(excluded.status, groups.status),
+                updated_at=excluded.updated_at
+        """, (
+            g.get("gid", 0),
+            g.get("name", ""),
+            g.get("avatar", ""),
+            g.get("round_avatar", ""),
+            g.get("member_count", 0),
+            g.get("max_member", 0),
+            g.get("owner_id", 0),
+            json.dumps(g.get("admins", []), ensure_ascii=False),
+            g.get("summary", ""),
+            g.get("group_type", 0),
+            g.get("super_group_type", 0),
+            g.get("status", 0),
+            g.get("validate_type", 0),
+            g.get("raw_json", ""),
+            now,
+            now,
+        ))
+        count += 1
+    conn.commit()
+    return count
+
+
+def _update_group_mid(conn, gid: int, mid: str):
+    """更新群的 min_mid / max_mid 范围"""
+    conn.execute("""
+        UPDATE groups SET
+            min_mid = CASE
+                WHEN min_mid = '' OR min_mid > ? THEN ?
+                ELSE min_mid
+            END,
+            max_mid = CASE
+                WHEN max_mid = '' OR max_mid < ? THEN ?
+                ELSE max_mid
+            END
+        WHERE gid = ?
+    """, (mid, mid, mid, mid, gid))
+
+
+def save_message(msg: dict) -> bool:
+    """保存一条消息，已存在则忽略"""
+    conn = get_conn()
+    try:
+        cursor = conn.execute("""
+            INSERT OR IGNORE INTO messages
+                (mid, gid, msg_type, msg_type_name, media_type,
+                 sender_id, sender_name, text,
+                 fid, media_orig_url, media_local_path,
+                 url_objects, pic_infos,
+                 template, template_data,
+                 recall_mids, recall_by,
+                 attitude_data,
+                 faith_status, faith_icon, group_name, annotations,
+                 created_at, saved_at, raw_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            msg["mid"],
+            msg.get("gid", 0),
+            msg.get("msg_type", 321),
+            msg.get("msg_type_name", ""),
+            msg.get("media_type", 0),
+            msg.get("sender_id", 0),
+            msg.get("sender_name", ""),
+            msg.get("text", ""),
+            msg.get("fid", ""),
+            msg.get("media_orig_url", ""),
+            msg.get("media_local_path", ""),
+            msg.get("url_objects", ""),
+            msg.get("pic_infos", ""),
+            msg.get("template", ""),
+            msg.get("template_data", "{}"),
+            msg.get("recall_mids", "[]"),
+            msg.get("recall_by", ""),
+            msg.get("attitude_data", "{}"),
+            msg.get("faith_status", 0),
+            msg.get("faith_icon", ""),
+            msg.get("group_name", ""),
+            msg.get("annotations", "{}"),
+            int(msg.get("created_at", 0)),
+            int(time.time() * 1000),
+            msg.get("raw_json", ""),
+        ))
+        conn.commit()
+        return cursor.rowcount > 0
+    except Exception as e:
+        log.debug("save_message error: %s", e)
+        return False
+
+
+def refresh_group_range(gid: int):
+    """爬取完成后刷新群的 min_mid/max_mid 范围（从 messages 表实际数据计算）"""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT MIN(mid), MAX(mid) FROM messages WHERE gid=?", (gid,)
+    ).fetchone()
+    if row and row[0]:
+        conn.execute("""
+            UPDATE groups SET min_mid=?, max_mid=? WHERE gid=?
+        """, (row[0], row[1], gid))
+        conn.commit()
+
+
+def save_media_file(fid: str, gid: int = 0, mid: str = "",
+                    media_type: int = 0, orig_url: str = "") -> bool:
+    conn = get_conn()
+    now = int(time.time() * 1000)
+    try:
+        conn.execute("""
+            INSERT OR IGNORE INTO media_files
+                (fid, gid, mid, media_type, orig_url, status, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (fid, gid, mid, media_type, orig_url, "pending", now))
+        conn.commit()
+        return True
+    except Exception as e:
+        log.debug("save_media_file error: %s", e)
+        return False
+
+
+def update_media_file(fid: str, **kwargs):
+    conn = get_conn()
+    sets = []
+    vals = []
+    for k, v in kwargs.items():
+        if k in ("local_path", "file_size", "width", "height", "md5", "status", "downloaded_at"):
+            sets.append(f"{k}=?")
+            vals.append(v)
+    if sets:
+        vals.append(fid)
+        conn.execute(f"UPDATE media_files SET {', '.join(sets)} WHERE fid=?", vals)
+        conn.commit()
+
+
+def update_media_status(fid: str, status: str, local_path: str = "",
+                        file_size: int = 0, md5: str = ""):
+    now = int(time.time() * 1000)
+    update_media_file(fid, status=status, local_path=local_path,
+                      file_size=file_size, md5=md5, downloaded_at=now)
+
+
+def update_message_media_local_path(mid: str, local_path: str):
+    conn = get_conn()
+    conn.execute("UPDATE messages SET media_local_path=? WHERE mid=?", (local_path, mid))
+    conn.commit()
+
+
+def set_group_last_fetch(gid: int):
+    conn = get_conn()
+    now = int(time.time())
+    conn.execute("UPDATE groups SET updated_at=? WHERE gid=?", (now * 1000, gid))
+    conn.commit()
+
+
+# ── 读取 ──────────────────────────────────────────────────
+
+
+def get_group_list() -> list[dict]:
+    conn = get_conn()
+    rows = conn.execute("SELECT * FROM groups ORDER BY name").fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_group_mids(gid: int) -> set[str]:
+    """获取群已存储的全部 mid"""
+    conn = get_conn()
+    rows = conn.execute("SELECT mid FROM messages WHERE gid=?", (gid,)).fetchall()
+    return {r[0] for r in rows}
+
+
+def get_latest_mid(gid: int) -> str | None:
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT mid FROM messages WHERE gid=? ORDER BY created_at DESC LIMIT 1",
+        (gid,),
+    ).fetchone()
+    return row[0] if row else None
+
+
+def get_group_mid_range(gid: int) -> tuple[str | None, str | None]:
+    """获取群的 mid 范围 (min_mid, max_mid)"""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT min_mid, max_mid FROM groups WHERE gid=?", (gid,)
+    ).fetchone()
+    if row and row[0]:
+        return (row[0], row[1])
+    return (None, None)
+
+
+def get_pending_media(limit: int = 20) -> list[dict]:
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT * FROM media_files WHERE status='pending' ORDER BY id LIMIT ?",
+        (limit,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_stats() -> dict:
+    conn = get_conn()
+    msgs = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+    groups = conn.execute("SELECT COUNT(DISTINCT gid) FROM messages").fetchone()[0]
+    groups_total = conn.execute("SELECT COUNT(*) FROM groups").fetchone()[0]
+    media_done = conn.execute("SELECT COUNT(*) FROM media_files WHERE status='done'").fetchone()[0]
+    media_pending = conn.execute("SELECT COUNT(*) FROM media_files WHERE status='pending'").fetchone()[0]
+    media_failed = conn.execute("SELECT COUNT(*) FROM media_files WHERE status='failed'").fetchone()[0]
+    return {
+        "messages": msgs,
+        "groups_with_msgs": groups,
+        "groups_total": groups_total,
+        "media_done": media_done,
+        "media_pending": media_pending,
+        "media_failed": media_failed,
+    }
+```
+
+### 文件: weibo_im/crawler.py
+```python
+"""爬虫核心 — HTTP API 客户端 + 爬取逻辑"""
+from __future__ import annotations
+
+import json
+import os
+import time
+import random
+import logging
+from datetime import datetime, timezone, timedelta
+from pathlib import Path
+
+import requests
+import urllib3
+
+from .types import msg_type_name
+from .parser import parse_messages
+from .db import (
+    init_db, save_groups, save_message, save_media_file,
+    get_latest_mid, get_skip_gids,
+)
+from .media import download_pending
+
+urllib3.disable_warnings()
+log = logging.getLogger("weibo_im.crawler")
+
+API_BASE = "https://api.weibo.com"
+SOURCE = "209678993"
+CST = timezone(timedelta(hours=8))
+
+
+def _midnight_today_ms() -> int:
+    """今天零点 (CST) 的毫秒时间戳"""
+    now = datetime.now(CST)
+    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    return int(midnight.timestamp() * 1000)
+
+# 不爬取的群 gid 存储在 config 表 skip_gids 键中
+
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    "Origin": "https://api.weibo.com",
+    "Referer": "https://api.weibo.com/webim/",
+    "Sec-Fetch-Dest": "empty",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Site": "same-origin",
+}
+
+
+def _jitter_sleep(base: float, jitter: float = 0.2):
+    """带抖动的等待，jitter 为 ±比例"""
+    actual = base * (1 + random.uniform(-jitter, jitter))
+    time.sleep(max(actual, 0.05))
+
+
+def _request_with_retry(session: requests.Session, method: str, url: str,
+                        max_retries: int = 3, **kwargs) -> requests.Response:
+    """带退避重试的 HTTP 请求"""
+    last_err = None
+    for attempt in range(max_retries + 1):
+        try:
+            resp = session.request(method, url, **kwargs)
+            # 5xx — 可重试
+            if resp.status_code >= 500:
+                if attempt < max_retries:
+                    wait = (2 ** attempt) * (1 + random.uniform(0, 0.5))
+                    log.warning("  ↻ 5xx(%d) 重试 %d/%d, 等待 %.1fs",
+                                resp.status_code, attempt + 1, max_retries, wait)
+                    time.sleep(wait)
+                    continue
+            # 429 — 限流，多等一会
+            if resp.status_code == 429:
+                if attempt < max_retries:
+                    wait = (4 ** attempt) * (1 + random.uniform(0, 0.5))
+                    log.warning("  ↻ 429 限流 重试 %d/%d, 等待 %.1fs",
+                                attempt + 1, max_retries, wait)
+                    time.sleep(wait)
+                    continue
+            resp.raise_for_status()
+            return resp
+        except (requests.ConnectionError, requests.Timeout) as e:
+            last_err = e
+            if attempt < max_retries:
+                wait = (2 ** attempt) * (1 + random.uniform(0, 0.5))
+                log.warning("  ↻ 连接错误(%s) 重试 %d/%d, 等待 %.1fs",
+                            e.__class__.__name__, attempt + 1, max_retries, wait)
+                time.sleep(wait)
+                continue
+        except requests.HTTPError as e:
+            # 4xx 非 429 不重试
+            if e.response is not None and 400 <= e.response.status_code < 500 \
+               and e.response.status_code != 429:
+                raise
+            last_err = e
+            if attempt < max_retries:
+                wait = (2 ** attempt) * (1 + random.uniform(0, 0.5))
+                log.warning("  ↻ HTTP错误(%s) 重试 %d/%d, 等待 %.1fs",
+                            e.__class__.__name__, attempt + 1, max_retries, wait)
+                time.sleep(wait)
+                continue
+    raise last_err or RuntimeError("请求失败（重试耗尽）")
+
+
+def make_session(cookie: str) -> requests.Session:
+    session = requests.Session()
+    session.verify = False
+    session.headers.update(HEADERS)
+    session.headers["Cookie"] = cookie
+    return session
+
+
+# ── API 调用 ──────────────────────────────────────────────
+
+
+def fetch_contacts(session: requests.Session) -> list[dict]:
+    """获取所有群聊列表（来自 contacts.json）"""
+    ts = int(time.time() * 1000)
+    resp = _request_with_retry(
+        session, "GET", f"{API_BASE}/webim/2/direct_messages/contacts.json",
+        params={
+            "special_source": "3",
+            "add_virtual_user": "3,4",
+            "is_include_group": "0",
+            "need_back": "0,0",
+            "is_include_folder": "1",
+            "count": "50",
+            "source": SOURCE,
+            "t": str(ts),
+        },
+        timeout=15,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    groups = []
+    for c in data.get("contacts", []):
+        user = c.get("user", {})
+        if user.get("type") != 2:
+            continue
+        groups.append({
+            "gid": user["id"],
+            "name": user.get("name", ""),
+            "member_count": user.get("member_count", 0),
+            "max_member": user.get("max_member_count", 0),
+            "avatar": user.get("avatar_large", ""),
+            "round_avatar": user.get("round_avatar_large", ""),
+            "owner_id": user.get("creator", 0),
+            "summary": user.get("description", ""),
+            "group_type": user.get("group_type", 0),
+            "super_group_type": user.get("super_group_type", 0),
+            "status": user.get("group_status", 0),
+            "validate_type": user.get("validateType", 0),
+            "raw_json": json.dumps(c, ensure_ascii=False),
+        })
+    return groups
+
+
+def fetch_messages(session: requests.Session, gid: int,
+                   count: int = 50, max_mid: str = None) -> list[dict]:
+    """获取群聊消息列表。max_mid 为空时取最新，有值时取该 mid 之前的更早消息。
+
+    注意: API 返回的消息按 从旧到新 (oldest first) 排列。
+          msgs[0]  = 页面上最旧的消息
+          msgs[-1] = 页面上最新的消息
+          翻页游标用 msgs[0].id（最旧的 id 传给 max_mid = "取比这个更旧的"）。
+          停止条件用 msgs[-1].id 和已知 max_mid 比较。
+    """
+    ts = int(time.time() * 1000)
+    params = {
+        "id": str(gid),
+        "count": str(count),
+        "convert_emoji": "1",
+        "query_sender": "1",
+        "source": SOURCE,
+        "t": str(ts),
+    }
+    if max_mid:
+        params["max_mid"] = str(max_mid)
+
+    resp = _request_with_retry(
+        session, "GET", f"{API_BASE}/webim/groupchat/query_messages.json",
+        params=params,
+        timeout=15,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if not data.get("result"):
+        log.warning("[群%s] query_messages 返回 result=false (可能被限流或 cookie 过期)", gid)
+        return []
+    return data.get("messages", [])
+
+
+# ── 爬取逻辑 ──────────────────────────────────────────────
+
+
+class Crawler:
+    """爬虫核心类"""
+
+    def __init__(self, db_path: str | Path, cookie: str = ""):
+        """初始化爬虫
+
+        Args:
+            db_path: 数据库路径
+            cookie: 可选，如提供则存入 DB；否则从 DB 读取
+        """
+        from .db import set_db_path, set_cookie as db_set_cookie, get_cookie
+        set_db_path(str(db_path))
+        init_db()
+        if cookie:
+            db_set_cookie(cookie)
+            self.cookie = cookie
+        else:
+            self.cookie = get_cookie()
+        if not self.cookie:
+            raise RuntimeError(
+                "Cookie 未设置。请先运行: python crawl.py --set-cookie "
+                "'SUB=xxx; SUBP=yyy'"
+            )
+        self.session = make_session(self.cookie)
+
+    def sync_groups(self) -> list[dict]:
+        """刷新群列表，返回群列表（过滤掉 config skip_gids）"""
+        groups = fetch_contacts(self.session)
+        groups = [g for g in groups if g["gid"] not in get_skip_gids()]
+        save_groups(groups)
+        log.info("群列表更新: %d 个群", len(groups))
+        return groups
+
+    def crawl_group(self, gid: int, name: str,
+                    download_media: bool = True,
+                    since_time: int | None = None) -> dict:
+        """爬取单个群的消息
+
+        Args:
+            since_time: 毫秒时间戳，消息早于此时停止翻页。
+                        None → 首次运行默认回到今天零点
+        """
+        last_mid = get_latest_mid(gid)
+        first_run = not last_mid
+
+        if first_run:
+            # 首次运行：默认回到今天零点
+            if since_time is None:
+                since_time = _midnight_today_ms()
+            return self._backfill_group(gid, name,
+                                        since_time=since_time)
+
+        # 非首次运行 + 指定时间 → 填补空隙（从 min_mid 往前翻到 since_time）
+        if since_time is not None:
+            from .db import get_group_mid_range
+            min_mid, _ = get_group_mid_range(gid)
+            return self._backfill_group(gid, name,
+                                        since_time=since_time,
+                                        start_mid=min_mid)
+
+        # 后续运行：翻页拉取新增消息（右向扩展线段）
+        #
+        # API 返回顺序：从旧到新（oldest first）。
+        #   msgs[0]  = 最旧的  → 翻页游标：传 msgs[0].id 给 max_mid 以取更早消息
+        #   msgs[-1] = 最新的  → 停止条件：msgs[-1].id ≤ max_mid 则整页已知
+        new_count = 0
+        media_count = 0
+        cursor = ""  # 从最新开始
+        from .db import get_group_mid_range
+        _, max_mid = get_group_mid_range(gid)
+
+        for page in range(100):
+            msgs = fetch_messages(self.session, gid, count=50,
+                                  max_mid=cursor or None)
+            if not msgs:
+                break
+
+            # 检查最新一条消息是否 ≤ max_mid（整页都在已知范围内）
+            # API 从旧到新，msgs[-1] 是页面上最新的
+            last_id = str(msgs[-1].get("id", ""))
+            if max_mid and last_id <= max_mid:
+                break  # 最新一条 ≤ max_mid，整页已知
+
+            # 过滤掉已知旧消息，只处理新消息
+            parsed = parse_messages(msgs, default_gid=gid)
+            for pm in parsed:
+                if max_mid and pm["mid"] <= max_mid:
+                    continue  # 跳过已知消息
+                if save_message(pm):
+                    new_count += 1
+                    if pm["fid"] and pm["media_orig_url"]:
+                        save_media_file(
+                            fid=pm["fid"], gid=gid, mid=pm["mid"],
+                            media_type=pm["media_type"],
+                            orig_url=pm["media_orig_url"],
+                        )
+                        media_count += 1
+
+            if len(msgs) < 50:
+                break  # 无更多页
+            # msgs[0] = 本页最旧消息，传给 max_mid 以翻到更早的下一页
+            cursor = str(msgs[0].get("id", ""))
+            _jitter_sleep(0.3)
+
+        # 刷新线段范围
+        if new_count > 0:
+            from .db import refresh_group_range
+            refresh_group_range(gid)
+            log.info("  ⇣ [%s] +%d 条新消息 (%d 个文件)",
+                     name, new_count, media_count)
+        return {"new": new_count, "total": new_count, "media": media_count}
+
+    def _backfill_group(self, gid: int, name: str,
+                        since_time: int | None = None,
+                        start_mid: str | None = None) -> dict:
+        """翻页回填历史消息
+
+        API 返回顺序：从旧到新（oldest first）。
+          msgs[0]  = 最旧的 → 翻页游标
+          msgs[-1] = 最新的 → 停止条件（检查是否已达 since_time）
+
+        停止条件：API 返回空页 或 消息时间早于 since_time。
+        无数量/页数上限。
+
+        Args:
+            since_time: 毫秒时间戳，消息早于此时停止翻页
+        """
+        new_count = 0
+        media_count = 0
+        cursor = start_mid or ""  # 有 start_mid 则从其往前翻，否则从最新开始
+
+        while True:
+            msgs = fetch_messages(self.session, gid, count=50,
+                                  max_mid=cursor or None)
+            if not msgs:
+                break
+
+            # 检查最旧的消息是否已达截止时间
+            # API 从旧到新，msgs[-1] 是页面上最新的
+            oldest_ts = (msgs[-1].get("time") or 0)
+            if since_time and oldest_ts:
+                if oldest_ts < 1_000_000_000_000:
+                    oldest_ts *= 1000
+                if oldest_ts < since_time:
+                    # 最新消息已早于截止时间，但这一页里可能还有部分要存的
+                    pass  # 继续处理本页，后面用 break 退出循环
+
+            parsed = parse_messages(msgs, default_gid=gid)
+            for pm in reversed(parsed):
+                if since_time and pm["created_at"] < since_time:
+                    # 这条消息已经太旧了，停止
+                    cursor = ""
+                    break
+                if save_message(pm):
+                    new_count += 1
+                    if pm["fid"] and pm["media_orig_url"]:
+                        save_media_file(
+                            fid=pm["fid"], gid=gid, mid=pm["mid"],
+                            media_type=pm["media_type"],
+                            orig_url=pm["media_orig_url"],
+                        )
+                        media_count += 1
+            else:
+                # 没有触发 time break，继续翻页
+                # msgs[0] = 本页最旧消息，传给 max_mid 以翻到更早的下一页
+                cursor = str(msgs[0].get("id", ""))
+
+                if len(msgs) < 50:
+                    break
+
+                # 本页全部入库，左边界前移
+                from .db import refresh_group_range
+                refresh_group_range(gid)
+                _jitter_sleep(1.0)
+                continue
+
+            # 触发了 time break，退出
+            break
+
+        if new_count:
+            from .db import refresh_group_range
+            refresh_group_range(gid)
+            log.info("  ⬇ [%s] 回填 %d 条历史 (%d 个文件)",
+                     name, new_count, media_count)
+        return {"new": new_count, "total": new_count, "media": media_count}
+
+    def crawl_all(self, download_media: bool = False,
+                  group_interval: float = 1.5,
+                  since_time: int | None = None,
+                  gid: int = 0) -> dict:
+        """爬取所有群的消息
+
+        Args:
+            since_time: 毫秒时间戳，消息早于此时停止翻页。
+                        None → 首次运行默认回到今天零点
+            gid: 指定群 gid，0 表示爬取所有群
+        """
+        groups = self.sync_groups()
+        if gid:
+            groups = [g for g in groups if g["gid"] == gid]
+            if not groups:
+                log.warning("gid=%d 不在群列表中", gid)
+                return {"groups": 0, "groups_with_new": 0,
+                        "new_messages": 0, "media_pending": 0}
+        total_new = 0
+        total_media = 0
+        groups_with_new = 0
+
+        for g in groups:
+            try:
+                result = self.crawl_group(g["gid"], g["name"],
+                                          download_media=False,
+                                          since_time=since_time)
+                if result["new"] > 0:
+                    total_new += result["new"]
+                    total_media += result["media"]
+                    groups_with_new += 1
+                _jitter_sleep(group_interval, 0.15)
+            except Exception as e:
+                log.warning("  ✗ [%s] 错误: %s", g["name"], e)
+                _jitter_sleep(group_interval, 0.15)
+
+        # 统一下载媒体文件
+        if download_media and total_media > 0:
+            self.download_all_media()
+
+        # 扫描链接文件
+        if download_media:
+            self.scan_links(limit=500)
+
+        return {
+            "groups": len(groups),
+            "groups_with_new": groups_with_new,
+            "new_messages": total_new,
+            "media_pending": total_media,
+        }
+
+    def probe_boundary(self, gid: int, name: str = "") -> dict:
+        """盲测群聊最早可爬取边界（即入群时间），仅输出不入库（2年限制会漂移）"""
+        # mid → 时间戳 反推系数。
+        # 微博 WebIM 的 mid 是单调递增整数，时间戳隐编码在其中（每 ms 增长约 4194）。
+        # 通过 API 取两条已知时间消息的 mid，线性回归得到近似映射。
+        # 精度足够做指数后退和二分查找，不需要分布式 ID 生成器细节。
+        SLOPE = 4194.3044
+        INTERCEPT = -2162095133480728
+
+        def ts_to_mid(ts_ms: int) -> int:
+            return int(SLOPE * ts_ms + INTERCEPT)
+
+        # 找到当前最早消息时间
+        from .db import get_group_mid_range
+        min_mid_str, _ = get_group_mid_range(gid)
+        if not min_mid_str:
+            # 群里还没有消息，先拉一页最新的
+            msgs = fetch_messages(self.session, gid, count=50)
+            if not msgs:
+                return {"boundary_mid": None, "boundary_ts": None, "error": "群没有消息"}
+            min_mid_str = msgs[-1].get("idstr") or str(msgs[-1].get("id", ""))
+
+        # 用 mid 反推当前最早时间
+        earliest_known_ts = int(min_mid_str)
+        earliest_known_ts = int((earliest_known_ts - INTERCEPT) / SLOPE)
+
+        low_ts = earliest_known_ts
+        high_ts = None
+        low_mid = int(min_mid_str)  # 已知最旧消息的实际 mid
+
+        # Phase 1: 指数后退
+        log.info("  Phase 1: 指数后退 — 从最早已知时间往回探")
+        intervals_days = [1, 3, 7, 14, 30, 90, 180, 365, 730, 1095]
+
+        for days in intervals_days:
+            probe_ts = low_ts - days * 86400_000
+            probe_mid = ts_to_mid(probe_ts)
+            msgs = fetch_messages(self.session, gid, count=50, max_mid=str(probe_mid))
+            _jitter_sleep(0.3)
+            if msgs:
+                oldest = msgs[-1]
+                o_ts = (oldest.get("time") or 0)
+                if o_ts and o_ts < 1_000_000_000_000:
+                    o_ts *= 1000
+                low_ts = o_ts
+                low_mid = int(oldest.get("id", 0))
+            else:
+                high_ts = probe_ts
+                break
+
+        if high_ts is None:
+            return {"boundary_mid": None, "boundary_ts": None, "error": "后退3年仍未探空"}
+
+        # Phase 2: 二分
+        log.info("  Phase 2: 二分查找 — 窗口 %.1f 天", (low_ts - high_ts) / 86400000)
+        for _ in range(30):
+            if (low_ts - high_ts) < 3600 * 1000:
+                break
+            mid_ts = (low_ts + high_ts) // 2
+            probe_mid = ts_to_mid(mid_ts)
+            msgs = fetch_messages(self.session, gid, count=50, max_mid=str(probe_mid))
+            _jitter_sleep(0.3)
+            if msgs:
+                oldest = msgs[-1]
+                o_ts = (oldest.get("time") or 0)
+                if o_ts and o_ts < 1_000_000_000_000:
+                    o_ts *= 1000
+                low_ts = o_ts
+                low_mid = int(oldest.get("id", 0))
+            else:
+                high_ts = mid_ts
+
+        # Phase 3: 翻页到空
+        log.info("  Phase 3: 翻页到空")
+        cursor = low_mid
+
+        if cursor == 0:
+            return {"boundary_mid": None, "boundary_ts": None, "error": "起点即空"}
+
+        boundary = {"mid": cursor, "ts": low_ts, "sender": "", "text": ""}
+        for page in range(100):
+            msgs = fetch_messages(self.session, gid, count=50, max_mid=str(cursor))
+            if not msgs:
+                break
+            
+            oldest = msgs[-1]
+            cursor = int(oldest.get("id", cursor))
+            boundary["mid"] = cursor
+            o_ts = oldest.get("time", 0) or 0
+            if o_ts < 1_000_000_000_000:
+                o_ts *= 1000
+            boundary["ts"] = o_ts
+            boundary["sender"] = oldest.get("sender_screen_name", "") or ""
+            boundary["text"] = (oldest.get("text", "") or "")[:120]
+            _jitter_sleep(0.3)
+
+        import datetime as dt_module
+        dt_cst = dt_module.datetime.fromtimestamp(
+            boundary["ts"] / 1000 + 8 * 3600, tz=dt_module.timezone.utc
+        )
+        log.info("  → 最早边界: %s CST  mid=%s  sender=%s  text=%s",
+                 dt_cst.isoformat(), boundary["mid"],
+                 boundary["sender"] or "(空)", boundary["text"] or "(空)")
+        return boundary
+
+    def download_all_media(self):
+        """下载所有待处理的媒体文件（逐个下载直到队列清空）"""
+        total = 0
+        while True:
+            count = download_pending(limit=10)
+            if count == 0:
+                break
+            total += count
+            _jitter_sleep(0.3)
+        if total > 0:
+            log.info("媒体下载完成: %d 个", total)
+
+    def download_fid(self, fid: str) -> dict:
+        """下载指定 fid 的单个媒体文件"""
+        from .db import get_conn
+        from .media import download_file, update_media_status, update_message_media_local_path
+
+        conn = get_conn()
+        row = conn.execute(
+            "SELECT * FROM media_files WHERE fid=?", (fid,)
+        ).fetchone()
+        if not row:
+            return {"error": f"fid={fid} 不存在于 media_files 表中"}
+
+        r = dict(row)
+        if r["status"] == "done" and r["local_path"] and os.path.isfile(r["local_path"]):
+            return {"status": "already_done", "local_path": r["local_path"]}
+        # 下载文件
+        result = download_file(r["fid"], r["orig_url"], r["media_type"])
+        update_media_status(
+            r["fid"],
+            status=result["status"],
+            local_path=result["local_path"],
+            file_size=result["file_size"],
+            md5=result["md5"],
+        )
+        if result["status"] == "done" and r["mid"]:
+            update_message_media_local_path(r["mid"], result["local_path"])
+
+        return result
+
+    def scan_links(self, limit: int = 500):
+        """扫描最近消息中的外部链接，下载文件（PDF/ZIP 等）"""
+        from .links import scan_and_download_messages
+        return scan_and_download_messages(limit=limit)
+
+    def stats(self) -> dict:
+        from .db import get_stats
+        return get_stats()
+```
+
+### 文件: weibo_im/media.py
+```python
+"""媒体文件下载 — 从 upload API 下载图片/视频"""
+from __future__ import annotations
+
+import os
+import time
+import json
+import hashlib
+import logging
+from pathlib import Path
+
+import requests
+import urllib3
+
+from .db import (
+    update_media_status, update_message_media_local_path,
+    get_pending_media,
+)
+
+urllib3.disable_warnings()
+log = logging.getLogger("weibo_im.media")
+
+# 下载根目录 — 相对于本文件: Weibo-ChatClient/media/
+MEDIA_ROOT = Path(__file__).resolve().parent.parent / "media"
+
+# User-Agent 与 API 一致
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    "Origin": "https://web.im.weibo.com",
+    "Referer": "https://web.im.weibo.com/",
+}
+
+
+def _file_ext_from_url(url: str, media_type: int) -> tuple[str, str]:
+    """根据 media_type 和 URL 确定文件类型和扩展名"""
+    if media_type in (10, 13):
+        return ("video", ".mp4")
+    if media_type == 1:
+        return ("image", ".jpg")
+    elif media_type == 16:
+        return ("redpacket", ".png")
+    elif media_type == 5:
+        return ("file", ".bin")  # 待响应时根据 Content-Type 修正
+    else:
+        return ("unknown", ".bin")
+
+
+def _patch_ext_from_response(local_path: str, content_type: str,
+                              content_disposition: str, fid: str = "") -> str:
+    """根据响应头修正文件扩展名，优先使用 Content-Disposition 中的原始文件名"""
+    import re
+    from urllib.parse import unquote
+    save_dir = os.path.dirname(local_path)
+    # 1. 从 Content-Disposition 提取原始文件名
+    if content_disposition:
+        m = re.search(r'filename\*?=(?:UTF-8\'\')?\"?([^\"\n;]+)', content_disposition)
+        if m:
+            name = m.group(1)
+            name = unquote(name)
+            if name:
+                new_path = os.path.join(save_dir, name)
+                if not os.path.isfile(new_path) and os.path.isfile(local_path):
+                    os.rename(local_path, new_path)
+                    return new_path
+                # 冲突: {文件名}.{fid}.{ext}
+                stem, ext = os.path.splitext(name)
+                fallback = os.path.join(save_dir, f"{stem}.{fid}{ext}")
+                if not os.path.isfile(fallback) and os.path.isfile(local_path):
+                    os.rename(local_path, fallback)
+                    return fallback
+                # fallback 也冲突？极小概率，放弃改名
+                return local_path
+    # 2. 降级：从 Content-Type 判断扩展名
+    ct_map = {
+        "application/pdf": ".pdf",
+        "application/zip": ".zip",
+        "application/x-rar-compressed": ".rar",
+        "application/x-7z-compressed": ".7z",
+        "application/msword": ".doc",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+        "application/vnd.ms-excel": ".xls",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+        "application/vnd.android.package-archive": ".apk",
+        "image/jpeg": ".jpg",
+        "image/png": ".png",
+        "image/gif": ".gif",
+        "image/webp": ".webp",
+        "video/mp4": ".mp4",
+    }
+    ct = content_type.split(";")[0].strip().lower()
+    if ct in ct_map:
+        ext = ct_map[ct]
+        new_path = os.path.splitext(local_path)[0] + ext
+        if not os.path.isfile(new_path) and os.path.isfile(local_path):
+            os.rename(local_path, new_path)
+        return new_path
+    return local_path
+
+
+_COOKIE: str = ""
+
+
+def get_cookie_or_default() -> str:
+    """返回已设置的 cookie，未设置时从 DB 读取"""
+    global _COOKIE
+    if not _COOKIE:
+        from .db import get_cookie
+        _COOKIE = get_cookie()
+    return _COOKIE
+
+
+def set_cookie(c: str):
+    global _COOKIE
+    _COOKIE = c
+
+
+def download_file(fid: str, url: str, media_type: int,
+                  timeout: int = 60) -> dict:
+    """下载单个媒体文件，返回 {status, local_path, file_size, md5}"""
+    # 确定文件类型和扩展名
+    file_type, ext = _file_ext_from_url(url, media_type)
+
+    # 目标路径
+    sub = "files" if file_type == "file" else ("videos" if file_type == "video" else "images")
+    save_dir = MEDIA_ROOT / sub
+    save_dir.mkdir(parents=True, exist_ok=True)
+    local_path = str(save_dir / f"{fid}{ext}")
+
+    # 如果已存在则跳过
+    if os.path.isfile(local_path) and os.path.getsize(local_path) > 0:
+        file_size = os.path.getsize(local_path)
+        md5 = _calc_md5(local_path)
+        log.debug("已存在: %s (%d bytes)", local_path, file_size)
+        return {"status": "done", "local_path": local_path,
+                "file_size": file_size, "md5": md5}
+
+    if file_type == "redpacket":
+        with open(local_path, "w") as f:
+            f.write(f"redpacket fid={fid}")
+        return {"status": "done", "local_path": local_path, "file_size": 0, "md5": ""}
+
+    try:
+        log.info("下载: %s", url)
+        h = dict(HEADERS)
+        ck = get_cookie_or_default()
+        if ck:
+            h["Cookie"] = ck
+        resp = requests.get(
+            url,
+            headers=h,
+            timeout=timeout,
+            verify=False,
+            stream=True,
+        )
+        if resp.status_code != 200:
+            log.warning("下载失败 [HTTP %d]: %s", resp.status_code, url)
+            return {"status": "failed", "local_path": "", "file_size": 0, "md5": ""}
+
+        # 写入文件
+        file_size = 0
+        with open(local_path, "wb") as f:
+            for chunk in resp.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+                    file_size += len(chunk)
+
+        # 根据响应头修正扩展名
+        ct = resp.headers.get("Content-Type", "")
+        cd = resp.headers.get("Content-Disposition", "")
+        corrected_path = _patch_ext_from_response(local_path, ct, cd, fid)
+        if corrected_path != local_path:
+            local_path = corrected_path
+
+        md5 = _calc_md5(local_path)
+        log.info("下载完成: %s (%d bytes)", local_path, file_size)
+        return {"status": "done", "local_path": local_path,
+                "file_size": file_size, "md5": md5}
+
+    except Exception as e:
+        log.error("下载异常: %s — %s", url, e)
+        return {"status": "failed", "local_path": "", "file_size": 0, "md5": ""}
+
+
+def download_pending(limit: int = 10, cookie: str = ""):
+    """下载 pending 状态的媒体文件"""
+    if cookie:
+        set_cookie(cookie)
+    get_cookie_or_default()  # 确保 cookie 被加载
+    files = get_pending_media(limit)
+    for f in files:
+        result = download_file(f["fid"], f["orig_url"], f["media_type"])
+        update_media_status(
+            f["fid"],
+            status=result["status"],
+            local_path=result["local_path"],
+            file_size=result["file_size"],
+            md5=result["md5"],
+        )
+        # 回写 messages 的 media_local_path
+        if result["status"] == "done" and f["mid"]:
+            update_message_media_local_path(f["mid"], result["local_path"])
+    return len(files)
+
+
+def _calc_md5(path: str) -> str:
+    h = hashlib.md5()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+```
+
+### 文件: weibo_im/links.py
+```python
+"""链接文件下载 — 检测并下载外部链接指向的可下载文件（PDF/ZIP 等）"""
+from __future__ import annotations
+
+import os
+import re
+import time
+import json
+import hashlib
+import logging
+from pathlib import Path
+from urllib.parse import urlparse
+
+import requests
+import urllib3
+
+from .db import get_conn
+
+urllib3.disable_warnings()
+log = logging.getLogger("weibo_im.links")
+
+# 下载根目录 — 文件存在 Weibo-ChatClient/media/files/ 下
+FILES_ROOT = Path(__file__).resolve().parent.parent / "media" / "files"
+
+# 识别的文件类型
+FILE_EXTENSIONS = {
+    ".pdf": "pdf",
+    ".zip": "zip",
+    ".rar": "rar",
+    ".7z": "7z",
+    ".tar": "tar",
+    ".gz": "gzip",
+    ".doc": "doc",
+    ".docx": "docx",
+    ".xls": "xls",
+    ".xlsx": "xlsx",
+    ".ppt": "ppt",
+    ".pptx": "pptx",
+    ".txt": "text",
+    ".csv": "csv",
+    ".apk": "apk",
+    ".exe": "exe",
+    ".dmg": "dmg",
+}
+
+# Content-Type 到文件类型的映射（HEAD 请求用）
+CONTENT_TYPE_MAP: dict[str, str] = {
+    "application/pdf": "pdf",
+    "application/zip": "zip",
+    "application/x-rar-compressed": "rar",
+    "application/x-7z-compressed": "7z",
+    "application/gzip": "gzip",
+    "application/x-gzip": "gzip",
+    "application/msword": "doc",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+    "application/vnd.ms-excel": "xls",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
+    "application/vnd.ms-powerpoint": "ppt",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": "pptx",
+    "application/vnd.android.package-archive": "apk",
+    "application/x-msdownload": "exe",
+}
+
+_COOKIE: str = ""
+_HEADERS: dict = {}
+
+
+def get_cookie_or_default() -> str:
+    global _COOKIE
+    if not _COOKIE:
+        from .db import get_cookie
+        _COOKIE = get_cookie()
+    return _COOKIE
+
+
+def set_cookie(c: str):
+    global _COOKIE, _HEADERS
+    _COOKIE = c
+    _HEADERS = {
+        "User-Agent": (
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    }
+
+
+URL_PATTERN = re.compile(r'https?://[^\s，。、\'\"\]\)）】〞〟»›»]+')
+
+
+def extract_urls(text: str) -> list[str]:
+    """从文本中提取 URL"""
+    return [m.group().rstrip(")）") for m in URL_PATTERN.finditer(text)]
+
+
+def resolve_tcn(url: str, timeout: int = 10) -> str:
+    """解析 t.cn 短链，返回真实 URL。非 t.cn 直接返回原 URL。"""
+    if "t.cn" not in url:
+        return url
+    try:
+        h = dict(_HEADERS) if _HEADERS else {}
+        ck = get_cookie_or_default()
+        if ck:
+            h["Cookie"] = ck
+        resp = requests.head(url, headers=h, timeout=timeout,
+                             allow_redirects=True, verify=False)
+        return resp.url or url
+    except Exception:
+        return url
+
+
+def is_downloadable_file(url: str) -> tuple[str, str] | None:
+    """检查 URL 是否指向可下载文件，返回 (文件类型, 真实URL) 或 None"""
+    # 1. 先看后缀
+    lower = url.lower().rstrip("/")
+    for ext, ftype in FILE_EXTENSIONS.items():
+        if lower.endswith(ext):
+            # 去掉可能的 query string
+            parsed = urlparse(lower)
+            if parsed.path.endswith(ext):
+                return (ftype, url)
+
+    # 2. 没有后缀，发 HEAD 请求检查 Content-Type
+    try:
+        h = dict(_HEADERS) if _HEADERS else {}
+        ck = get_cookie_or_default()
+        if ck:
+            h["Cookie"] = ck
+        resp = requests.head(url, headers=h, timeout=10,
+                             allow_redirects=True, verify=False)
+        ct = resp.headers.get("Content-Type", "").split(";")[0].strip().lower()
+        if ct in CONTENT_TYPE_MAP:
+            return (CONTENT_TYPE_MAP[ct], resp.url or url)
+    except Exception:
+        pass
+
+    return None
+
+
+def download_link_file(url: str, file_type: str, mid: str = "",
+                       gid: int = 0, timeout: int = 120) -> dict:
+    """下载链接文件，返回 {status, local_path, file_size, md5}"""
+    FILES_ROOT.mkdir(parents=True, exist_ok=True)
+
+    # 用 URL 的 MD5 作为文件名（避免长文件名问题）
+    url_hash = hashlib.md5(url.encode()).hexdigest()[:16]
+    filename = f"{url_hash}.{file_type}"
+    local_path = str(FILES_ROOT / filename)
+
+    if os.path.isfile(local_path) and os.path.getsize(local_path) > 0:
+        return {
+            "status": "done", "local_path": local_path,
+            "file_size": os.path.getsize(local_path),
+            "md5": _calc_md5(local_path),
+        }
+
+    try:
+        h = dict(_HEADERS) if _HEADERS else {}
+        ck = get_cookie_or_default()
+        if ck:
+            h["Cookie"] = ck
+        log.info("下载链接文件: %s", url)
+        resp = requests.get(url, headers=h, timeout=timeout,
+                            stream=True, verify=False)
+        if resp.status_code != 200:
+            log.warning("链接文件下载失败 [HTTP %d]: %s", resp.status_code, url)
+            return {"status": "failed", "local_path": "", "file_size": 0, "md5": ""}
+
+        file_size = 0
+        with open(local_path, "wb") as f:
+            for chunk in resp.iter_content(chunk_size=65536):
+                if chunk:
+                    f.write(chunk)
+                    file_size += len(chunk)
+
+        md5 = _calc_md5(local_path)
+        log.info("链接文件下载完成: %s (%d bytes)", local_path, file_size)
+
+        # 存入 DB
+        _save_link_file(gid, mid, url, url_hash, file_type,
+                        local_path, file_size, md5, "done")
+        return {"status": "done", "local_path": local_path,
+                "file_size": file_size, "md5": md5}
+
+    except Exception as e:
+        log.error("链接文件下载异常: %s — %s", url, e)
+        _save_link_file(gid, mid, url, url_hash, file_type,
+                        "", 0, "", "failed")
+        return {"status": "failed", "local_path": "", "file_size": 0, "md5": ""}
+
+
+def _save_link_file(gid: int, mid: str, url: str, url_hash: str,
+                    file_type: str, local_path: str,
+                    file_size: int, md5: str, status: str):
+    """写入 link_files 表"""
+    conn = get_conn()
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS link_files (
+            id        INTEGER PRIMARY KEY AUTOINCREMENT,
+            url_hash  TEXT NOT NULL,
+            url       TEXT NOT NULL,
+            gid       INTEGER DEFAULT 0,
+            mid       TEXT DEFAULT '',
+            file_type TEXT DEFAULT '',
+            local_path TEXT DEFAULT '',
+            file_size INTEGER DEFAULT 0,
+            md5       TEXT DEFAULT '',
+            status    TEXT DEFAULT 'pending',
+            created_at INTEGER NOT NULL,
+            UNIQUE(url_hash)
+        )
+    """)
+    now = int(time.time() * 1000)
+    conn.execute("""
+        INSERT OR REPLACE INTO link_files
+            (url_hash, url, gid, mid, file_type, local_path,
+             file_size, md5, status, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (url_hash, url, gid, mid, file_type, local_path,
+          file_size, md5, status, now))
+    conn.commit()
+
+
+def scan_and_download_messages(limit: int = 200):
+    """扫描消息中的外部链接，检测并下载文件"""
+    conn = get_conn()
+    # 确保表存在
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS link_files (
+            id        INTEGER PRIMARY KEY AUTOINCREMENT,
+            url_hash  TEXT NOT NULL,
+            url       TEXT NOT NULL,
+            gid       INTEGER DEFAULT 0,
+            mid       TEXT DEFAULT '',
+            file_type TEXT DEFAULT '',
+            local_path TEXT DEFAULT '',
+            file_size INTEGER DEFAULT 0,
+            md5       TEXT DEFAULT '',
+            status    TEXT DEFAULT 'pending',
+            created_at INTEGER NOT NULL,
+            UNIQUE(url_hash)
+        )
+    """)
+    conn.commit()
+
+    # 获取已扫描过的 url_hash
+    scanned = set(r[0] for r in conn.execute(
+        "SELECT url_hash FROM link_files").fetchall())
+
+    rows = conn.execute("""
+        SELECT mid, gid, text, url_objects, media_type
+        FROM messages
+        ORDER BY created_at DESC
+        LIMIT ?
+    """, (limit,)).fetchall()
+
+    found = 0
+    for row in rows:
+        mid, gid, text, uo_json, media_type = row
+        urls = set()
+
+        # 1. 从 text 提取
+        if text and ("http" in text):
+            for u in extract_urls(text):
+                if "weibo.com" not in u and "sinaimg" not in u:
+                    urls.add(u.strip())
+
+        # 2. 从 url_objects 提取
+        if uo_json and uo_json not in ("[]", "{}", ""):
+            try:
+                uo = json.loads(uo_json)
+                if isinstance(uo, list):
+                    for item in uo:
+                        info = item.get("info", {})
+                        ul = info.get("url_long", "")
+                        if ul and "weibo.com" not in ul and "sinaimg" not in ul:
+                            urls.add(ul)
+            except Exception:
+                pass
+
+        for url in urls:
+            url_hash = hashlib.md5(url.encode()).hexdigest()[:16]
+            if url_hash in scanned:
+                continue
+            scanned.add(url_hash)
+
+            # 解析 t.cn
+            real_url = resolve_tcn(url)
+            if real_url != url:
+                # 也检查 real_url 的 hash
+                rh = hashlib.md5(real_url.encode()).hexdigest()[:16]
+                if rh in scanned:
+                    continue
+                scanned.add(rh)
+
+            result = is_downloadable_file(real_url)
+            if result:
+                file_type, target_url = result
+                download_link_file(target_url, file_type, mid, gid)
+                found += 1
+                # 慢一点，别打太多请求
+                time.sleep(1)
+
+    log.info("链接文件扫描完成: 检查 %d 条消息, 发现 %d 个文件", len(rows), found)
+    return found
+
+
+def _calc_md5(path: str) -> str:
+    h = hashlib.md5()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+```

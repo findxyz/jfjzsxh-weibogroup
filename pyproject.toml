@@ -1,0 +1,17 @@
+[project]
+name = "weibochat-crawler"
+version = "0.1.0"
+description = "微博群聊消息抓取与本地存储（本地版，无外部服务依赖）"
+requires-python = ">=3.11"
+dependencies = [
+    "requests",
+    "urllib3",
+    "playwright",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["weibo_im"]

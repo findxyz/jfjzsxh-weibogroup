@@ -1,0 +1,190 @@
+# ─────────────────────────────────────────────────────────────
+# ⚠️ 安全相关（绝对不能上传）
+# ─────────────────────────────────────────────────────────────
+
+# 数据库文件 —— 内含 Cookie (SUB/SUBP 登录票据)，泄露等于账号被盗！
+# 同时包含全部群聊消息、媒体清单等隐私数据。
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# 扫码登录二维码截图（可能含可识别信息）
+qrcode.png
+qrcode-*.png
+
+# .env / 配置覆盖文件（如果你之后用来存本地配置）
+.env
+.env.*
+*.local
+
+
+# ─────────────────────────────────────────────────────────────
+# 运行时产物
+# ─────────────────────────────────────────────────────────────
+
+# 下载的媒体文件（图片/视频/附件，可能很大且含群聊隐私）
+# 注：保留目录结构，让 clone 后程序能正常 mkdir
+media/*
+!media/.gitkeep
+!media/images/
+!media/videos/
+!media/files/
+media/images/*
+media/videos/*
+media/files/*
+!media/images/.gitkeep
+!media/videos/.gitkeep
+!media/files/.gitkeep
+
+# 运行日志
+*.log
+logs/
+
+
+# ─────────────────────────────────────────────────────────────
+# Python
+# ─────────────────────────────────────────────────────────────
+
+# 字节码缓存
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 发行/打包产物
+build/
+dist/
+*.egg-info/
+*.egg
+develop-eggs/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.manifest
+*.spec
+pip-log.txt
+pip-delete-this-directory.txt
+
+# 虚拟环境
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# 测试 / 类型检查 / 覆盖率
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetokens.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+.ruff_cache/
+
+
+# ─────────────────────────────────────────────────────────────
+# uv / pip
+# ─────────────────────────────────────────────────────────────
+
+# 注意: uv.lock 是依赖锁文件，【需要保留】以复现环境，不要忽略！
+
+
+# ─────────────────────────────────────────────────────────────
+# Playwright
+# ─────────────────────────────────────────────────────────────
+
+# Playwright 下载的浏览器二进制（默认在用户目录，但项目内也可能有）
+ms-playwright/
+test-results/
+playwright-report/
+blob-report/
+.playwright/
+
+
+# ─────────────────────────────────────────────────────────────
+# 编辑器 / IDE
+# ─────────────────────────────────────────────────────────────
+
+# VS Code
+.vscode/
+*.code-workspace
+!.vscode/settings.json
+
+# JetBrains (PyCharm / IntelliJ)
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# Sublime / Vim / Emacs
+*.sublime-workspace
+*.sublime-project
+*.swp
+*.swo
+*~
+\#*\#
+.\#*
+
+# Jupyter
+.ipynb_checkpoints/
+*/.ipynb_checkpoints/*
+
+# Spyder
+.spyderproject
+.spyproject
+
+
+# ─────────────────────────────────────────────────────────────
+# 操作系统
+# ─────────────────────────────────────────────────────────────
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+.Spotlight-V100
+.Trashes
+
+# Linux
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+
+
+# ─────────────────────────────────────────────────────────────
+# Git 自身
+# ─────────────────────────────────────────────────────────────
+
+*.orig
+*.rej
