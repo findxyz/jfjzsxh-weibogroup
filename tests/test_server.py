@@ -59,13 +59,54 @@ class ServerSkeletonTest(_ServerTestBase):
         self.assertEqual(status, 200)
         self.assertIn("<html", body)
 
-    def test_unknown_api_returns_501(self):
+    def test_unknown_api_returns_404(self):
         status, _ = self._get("/api/unknown")
-        self.assertEqual(status, 501)
+        self.assertEqual(status, 404)
 
     def test_404_for_missing(self):
         status, _ = self._get("/nope")
         self.assertEqual(status, 404)
+
+
+class MetadataApiTest(_ServerTestBase):
+    def make_data(self, conn):
+        conn.execute("INSERT INTO groups(gid,name) VALUES(100,'群A'),(200,'群B')")
+        # 群100：1750200000000 → 2025-06-18 CST，1750113600000 → 2025-06-17 CST
+        # 群200 一条
+        insert_messages(conn, [
+            {"mid": "m1", "gid": 100, "sender_id": 1, "sender_name": "甲",
+             "text": "hi", "created_at": 1750200000000},  # 2025-06-18 CST
+            {"mid": "m2", "gid": 100, "sender_id": 2, "sender_name": "乙",
+             "text": "yo", "created_at": 1750113600000},  # 2025-06-17 CST
+            {"mid": "m3", "gid": 100, "sender_id": 1, "sender_name": "甲",
+             "text": "x", "created_at": 1750113600000},
+            {"mid": "m4", "gid": 200, "sender_id": 9, "sender_name": "丙",
+             "text": "z", "created_at": 1750113600000},
+        ])
+
+    def test_groups(self):
+        status, data = self._get_json("/api/groups")
+        self.assertEqual(status, 200)
+        self.assertEqual(data, [
+            {"gid": 100, "name": "群A", "msg_count": 3},
+            {"gid": 200, "name": "群B", "msg_count": 1},
+        ])
+
+    def test_dates(self):
+        status, data = self._get_json("/api/dates?gid=100")
+        self.assertEqual(status, 200)
+        self.assertEqual(data, [
+            {"date": "2025-06-18", "count": 1},
+            {"date": "2025-06-17", "count": 2},
+        ])
+
+    def test_senders(self):
+        status, data = self._get_json("/api/senders?gid=100")
+        self.assertEqual(status, 200)
+        self.assertEqual(data, [
+            {"sender_id": 1, "sender_name": "甲", "count": 2},
+            {"sender_id": 2, "sender_name": "乙", "count": 1},
+        ])
 
 
 if __name__ == "__main__":

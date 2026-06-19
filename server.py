@@ -23,6 +23,40 @@ def open_db(db_path):
     return conn
 
 
+# ---------- 查询函数 ----------
+
+def query_groups(conn):
+    rows = conn.execute(
+        "SELECT g.gid, g.name, COUNT(m.id) AS msg_count "
+        "FROM groups g LEFT JOIN messages m ON m.gid = g.gid "
+        "GROUP BY g.gid ORDER BY msg_count DESC, g.gid"
+    ).fetchall()
+    return [{"gid": r["gid"], "name": r["name"], "msg_count": r["msg_count"]}
+            for r in rows]
+
+
+def query_dates(conn, gid):
+    rows = conn.execute(
+        "SELECT date(datetime(created_at/1000,'unixepoch','+8 hours')) AS d, "
+        "COUNT(*) AS c FROM messages WHERE gid=? "
+        "GROUP BY d ORDER BY d DESC",
+        (gid,),
+    ).fetchall()
+    return [{"date": r["d"], "count": r["c"]} for r in rows]
+
+
+def query_senders(conn, gid):
+    rows = conn.execute(
+        "SELECT sender_id, sender_name, COUNT(*) AS c "
+        "FROM messages WHERE gid=? AND sender_id<>0 "
+        "GROUP BY sender_id ORDER BY c DESC, sender_id",
+        (gid,),
+    ).fetchall()
+    return [{"sender_id": r["sender_id"],
+             "sender_name": r["sender_name"] or str(r["sender_id"]),
+             "count": r["c"]} for r in rows]
+
+
 # ---------- HTTP Handler ----------
 
 class Handler(BaseHTTPRequestHandler):
@@ -60,9 +94,25 @@ class Handler(BaseHTTPRequestHandler):
             self._serve_static(path[len("/web/"):])
             return
         if path.startswith("/api/"):
-            self._send_json({"error": "not implemented"}, status=501)
+            self._route_api(path, qs)
             return
         self._send_text("Not Found", status=404)
+
+    def _route_api(self, path, qs):
+        conn = self.conn
+        try:
+            if path == "/api/groups":
+                self._send_json(query_groups(conn))
+            elif path == "/api/dates":
+                gid = int(qs.get("gid", ["0"])[0])
+                self._send_json(query_dates(conn, gid))
+            elif path == "/api/senders":
+                gid = int(qs.get("gid", ["0"])[0])
+                self._send_json(query_senders(conn, gid))
+            else:
+                self._send_json({"error": "not found"}, status=404)
+        except Exception as e:
+            self._send_json({"error": str(e)}, status=500)
 
     def _serve_static(self, rel):
         # 防目录穿越
