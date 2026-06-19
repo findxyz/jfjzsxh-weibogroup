@@ -1,4 +1,6 @@
 * { box-sizing: border-box; }
+/* 兜底：防止 display 规则覆盖 hidden 属性（如搜索浮层） */
+[hidden] { display: none !important; }
 html, body { margin: 0; height: 100%; font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; }
 body { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
 

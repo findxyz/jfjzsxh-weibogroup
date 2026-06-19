@@ -92,8 +92,15 @@ class MetadataApiTest(_ServerTestBase):
             {"gid": 200, "name": "群B", "msg_count": 1},
         ])
 
-    def test_dates(self):
+    def test_dates_returns_monthly(self):
+        # 不带 month：按月聚合，倒序
         status, data = self._get_json("/api/dates?gid=100")
+        self.assertEqual(status, 200)
+        self.assertEqual(data, [{"month": "2025-06", "count": 3}])
+
+    def test_dates_returns_days_for_month(self):
+        # 带 month：该月每日条数，倒序
+        status, data = self._get_json("/api/dates?gid=100&month=2025-06")
         self.assertEqual(status, 200)
         self.assertEqual(data, [
             {"date": "2025-06-18", "count": 1},

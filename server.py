@@ -41,11 +41,24 @@ def query_groups(conn):
 
 
 def query_dates(conn, gid):
+    """按月聚合消息数，倒序返回。供左栏初始加载（只 ~24 行，不全表铺每日）。"""
+    rows = conn.execute(
+        "SELECT strftime('%Y-%m', datetime(created_at/1000,'unixepoch','+8 hours')) AS m, "
+        "COUNT(*) AS c FROM messages WHERE gid=? "
+        "GROUP BY m ORDER BY m DESC",
+        (gid,),
+    ).fetchall()
+    return [{"month": r["m"], "count": r["c"]} for r in rows]
+
+
+def query_month_days(conn, gid, month):
+    """指定月份（YYYY-MM）的每日消息数，倒序返回。点击展开月份时按需查。"""
     rows = conn.execute(
         "SELECT date(datetime(created_at/1000,'unixepoch','+8 hours')) AS d, "
         "COUNT(*) AS c FROM messages WHERE gid=? "
+        "AND strftime('%Y-%m', datetime(created_at/1000,'unixepoch','+8 hours'))=? "
         "GROUP BY d ORDER BY d DESC",
-        (gid,),
+        (gid, month),
     ).fetchall()
     return [{"date": r["d"], "count": r["c"]} for r in rows]
 
@@ -295,7 +308,11 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(query_groups(conn))
             elif path == "/api/dates":
                 gid = int(qs.get("gid", ["0"])[0])
-                self._send_json(query_dates(conn, gid))
+                month = qs.get("month", [None])[0]
+                if month:
+                    self._send_json(query_month_days(conn, gid, month))
+                else:
+                    self._send_json(query_dates(conn, gid))
             elif path == "/api/senders":
                 gid = int(qs.get("gid", ["0"])[0])
                 self._send_json(query_senders(conn, gid))

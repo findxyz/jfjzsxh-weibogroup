@@ -172,19 +172,24 @@ function renderDateList() {
     group.className = "month-group" + (mg.open ? " open" : "");
     const head = document.createElement("div");
     head.className = "month-header";
-    const total = mg.days.reduce((s, d) => s + d.count, 0);
-    head.textContent = `${mg.month} (${total})`;
-    head.onclick = () => { mg.open = !mg.open; group.classList.toggle("open"); };
+    head.textContent = `${mg.month} (${mg.count})`;
+    head.onclick = async () => {
+      mg.open = !mg.open;
+      if (mg.open && !mg.days) await loadMonthDays(mg.month);
+      group.classList.toggle("open");
+    };
     const days = document.createElement("div");
     days.className = "month-days";
-    for (const d of mg.days) {
-      const item = document.createElement("div");
-      item.className = "date-item" + (d.date === state.selectedDate ? " active" : "");
-      item.dataset.date = d.date;
-      const mmdd = d.date.slice(5);
-      item.innerHTML = `<span>${mmdd}</span><span class="count">${d.count}</span>`;
-      item.onclick = () => selectDate(d.date);
-      days.appendChild(item);
+    if (mg.days) {
+      for (const d of mg.days) {
+        const item = document.createElement("div");
+        item.className = "date-item" + (d.date === state.selectedDate ? " active" : "");
+        item.dataset.date = d.date;
+        const mmdd = d.date.slice(5);
+        item.innerHTML = `<span>${mmdd}</span><span class="count">${d.count}</span>`;
+        item.onclick = () => selectDate(d.date);
+        days.appendChild(item);
+      }
     }
     group.append(head, days);
     elDateList.appendChild(group);
@@ -192,11 +197,20 @@ function renderDateList() {
 }
 
 function highlightDate(date) {
-  // 展开对应月份并高亮
-  for (const mg of state.dates) {
-    if (mg.month === date.slice(0, 7)) mg.open = true;
-  }
+  // 展开对应月份（若每日未加载则懒加载后补渲染）并选中
+  const month = date.slice(0, 7);
+  const mg = state.dates.find(d => d.month === month);
   state.selectedDate = date;
+  if (mg) {
+    mg.open = true;
+    if (!mg.days) {
+      loadMonthDays(month).then(() => {
+        renderDateList();
+        const item = elDateList.querySelector(`.date-item[data-date="${date}"]`);
+        if (item) item.scrollIntoView({ block: "nearest" });
+      });
+    }
+  }
   renderDateList();
   const item = elDateList.querySelector(`.date-item[data-date="${date}"]`);
   if (item) item.scrollIntoView({ block: "nearest" });
@@ -217,17 +231,16 @@ async function loadSenders(gid) {
 
 async function loadDates(gid) {
   const data = await api(`/api/dates?gid=${gid}`);
-  // 按月分组，倒序
-  const byMonth = {};
-  for (const d of data) {
-    const m = d.date.slice(0, 7);
-    if (!byMonth[m]) byMonth[m] = [];
-    byMonth[m].push(d);
-  }
-  state.dates = Object.keys(byMonth).sort((a, b) => b.localeCompare(a)).map(m => ({
-    month: m, days: byMonth[m], open: false,
-  }));
-  if (state.dates.length) state.dates[0].open = true; // 默认展开最近月
+  // 按月聚合，倒序；days 初始为 null（点击展开才查）
+  state.dates = data.map(m => ({ month: m.month, count: m.count, days: null, open: false }));
+  renderDateList();
+}
+
+async function loadMonthDays(month) {
+  const mg = state.dates.find(d => d.month === month);
+  if (!mg || mg.days) return; // 已加载过则不重复查
+  const data = await api(`/api/dates?gid=${state.gid}&month=${encodeURIComponent(month)}`);
+  mg.days = data;
   renderDateList();
 }
 
@@ -256,9 +269,14 @@ async function selectGroup(gid) {
   elSender.value = "";
   elStatus.textContent = "加载中…";
   await Promise.all([loadDates(gid), loadSenders(gid)]);
-  // 默认选最新日期
-  if (state.dates.length && state.dates[0].days.length) {
-    await selectDate(state.dates[0].days[0].date);
+  // 默认展开最近月 + 加载每日 + 选最新日期
+  if (state.dates.length) {
+    const latest = state.dates[0];
+    latest.open = true;
+    await loadMonthDays(latest.month);
+    if (latest.days && latest.days.length) {
+      await selectDate(latest.days[0].date);
+    }
   }
 }
 
