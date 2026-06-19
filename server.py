@@ -80,14 +80,25 @@ def _get_fid_lock(fid):
         return _fid_locks[fid]
 
 
-def serve_media(conn, fid):
+def serve_media(db_path, fid):
     """按需下载并返回媒体文件本地路径。
 
     返回 (local_path, None) 成功；返回 (None, error_msg) 失败。
     命中缓存（local_path 存在且文件在）直接返回；否则用 DB cookie 调
     weibo_im.media.download_file 下载，回写 media_files 与 messages。
     同一 fid 用进程内锁串行化，避免并发重复下载。
+
+    用独立的可写连接（生产 API 连接是 mode=ro 只读），回写下载结果。
     """
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        return _serve_media_impl(conn, fid)
+    finally:
+        conn.close()
+
+
+def _serve_media_impl(conn, fid):
     row = conn.execute(
         "SELECT media_type, orig_url, local_path, mid FROM media_files WHERE fid=?",
         (fid,)).fetchone()
@@ -534,7 +545,7 @@ class Handler(BaseHTTPRequestHandler):
                     conn, gid, q, sender_name, start_ts, end_ts, limit))
             elif path.startswith("/api/media/"):
                 fid = path[len("/api/media/"):]
-                local_path, err = serve_media(conn, fid)
+                local_path, err = serve_media(self.db_path, fid)
                 if err:
                     self._send_json({"error": err}, status=404)
                 else:

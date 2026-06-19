@@ -363,6 +363,56 @@ class MediaApiTest(_ServerTestBase):
         self.assertEqual(status, 404)
         self.assertIn("not found", body["error"])
 
+    def test_media_cached_returns_file(self):
+        import tempfile
+        fd, img_path = tempfile.mkstemp(suffix=".jpg")
+        os.write(fd, b"\xff\xd8\xff\xe0FAKEJPEG")
+        os.close(fd)
+        self.addCleanup(os.remove, img_path)
+
+        conn = sqlite3.connect(self.db_path)
+        insert_media_files(conn, [{
+            "fid": "img_cached", "gid": 1, "mid": "m1", "media_type": 1,
+            "orig_url": "http://example.com/img", "local_path": img_path,
+            "status": "done", "created_at": 0,
+        }])
+        conn.close()
+
+        status, body = self._get("/api/media/img_cached")
+        self.assertEqual(status, 200)
+        self.assertIn("image/jpeg", self._last_content_type)
+        self.assertTrue(body.startswith(b"\xff\xd8"))
+
+    def test_media_download_on_demand(self):
+        import tempfile
+        fd, new_path = tempfile.mkstemp(suffix=".jpg")
+        os.write(fd, b"\xff\xd8DOWNLOADED")
+        os.close(fd)
+        self.addCleanup(os.remove, new_path)
+
+        conn = sqlite3.connect(self.db_path)
+        insert_media_files(conn, [{
+            "fid": "img_dl", "gid": 1, "mid": "m2", "media_type": 1,
+            "orig_url": "http://example.com/img_dl", "local_path": "",
+            "status": "pending", "created_at": 0,
+        }])
+        conn.close()
+
+        with mock.patch("weibo_im.media.download_file",
+                        return_value={"status": "done", "local_path": new_path,
+                                      "file_size": 12, "md5": "abc"}):
+            status, body = self._get("/api/media/img_dl")
+        self.assertEqual(status, 200)
+        self.assertIn("image/jpeg", self._last_content_type)
+
+        # 验证 DB 已回写
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        r = conn.execute("SELECT local_path, status FROM media_files WHERE fid='img_dl'").fetchone()
+        self.assertEqual(r["status"], "done")
+        self.assertEqual(r["local_path"], new_path)
+        conn.close()
+
 
 if __name__ == "__main__":
     unittest.main()
