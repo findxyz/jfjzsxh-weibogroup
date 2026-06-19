@@ -58,12 +58,40 @@ CREATE TABLE groups (
 )
 """
 
+MEDIA_FILES_DDL = """
+CREATE TABLE media_files (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    fid             TEXT NOT NULL UNIQUE,
+    gid             INTEGER DEFAULT 0,
+    mid             TEXT DEFAULT '',
+    media_type      INTEGER DEFAULT 0,
+    orig_url        TEXT DEFAULT '',
+    local_path      TEXT DEFAULT '',
+    file_size       INTEGER DEFAULT 0,
+    width           INTEGER DEFAULT 0,
+    height          INTEGER DEFAULT 0,
+    md5             TEXT DEFAULT '',
+    status          TEXT DEFAULT 'pending',
+    downloaded_at   INTEGER DEFAULT 0,
+    created_at      INTEGER NOT NULL
+)
+"""
+
+CONFIG_DDL = """
+CREATE TABLE config (
+    key   TEXT PRIMARY KEY,
+    value TEXT DEFAULT ''
+)
+"""
+
 INDEXES_DDL = [
     "CREATE INDEX idx_msg_gid   ON messages(gid)",
     "CREATE INDEX idx_msg_mtype ON messages(msg_type)",
     "CREATE INDEX idx_msg_ctime ON messages(created_at)",
     "CREATE INDEX idx_msg_mid   ON messages(mid)",
     "CREATE INDEX idx_msg_fid   ON messages(fid)",
+    "CREATE INDEX idx_mf_fid    ON media_files(fid)",
+    "CREATE INDEX idx_mf_status ON media_files(status)",
 ]
 
 
@@ -77,6 +105,8 @@ def make_test_db():
     conn = sqlite3.connect(path)
     conn.executescript(MESSAGES_DDL)
     conn.executescript(GROUPS_DDL)
+    conn.executescript(MEDIA_FILES_DDL)
+    conn.executescript(CONFIG_DDL)
     for ddl in INDEXES_DDL:
         conn.execute(ddl)
     conn.commit()
@@ -98,4 +128,28 @@ def insert_messages(conn, rows):
     placeholders = ",".join("?" for _ in cols)
     sql = f"INSERT INTO messages ({','.join(cols)}) VALUES ({placeholders})"
     conn.executemany(sql, [[r.get(c, defaults[c]) for c in cols] for r in rows])
+    conn.commit()
+
+
+def insert_media_files(conn, rows):
+    """批量插入 media_files。rows 是 list[dict]，缺失字段用默认值。"""
+    cols = [
+        "fid", "gid", "mid", "media_type", "orig_url", "local_path",
+        "file_size", "width", "height", "md5", "status",
+        "downloaded_at", "created_at",
+    ]
+    defaults = {c: "" for c in cols}
+    defaults.update({"gid": 0, "media_type": 0, "file_size": 0,
+                     "width": 0, "height": 0, "status": "pending",
+                     "downloaded_at": 0, "created_at": 0})
+    placeholders = ",".join("?" for _ in cols)
+    sql = f"INSERT INTO media_files ({','.join(cols)}) VALUES ({placeholders})"
+    conn.executemany(sql, [[r.get(c, defaults[c]) for c in cols] for r in rows])
+    conn.commit()
+
+
+def set_config(conn, key, value):
+    """写入 config 表一条记录（用于测试 cookie）。"""
+    conn.execute(
+        "INSERT OR REPLACE INTO config(key, value) VALUES (?, ?)", (key, value))
     conn.commit()
