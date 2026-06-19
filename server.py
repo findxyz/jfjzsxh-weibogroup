@@ -9,6 +9,7 @@ import json
 import mimetypes
 import os
 import sqlite3
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
@@ -47,6 +48,24 @@ def open_db(db_path):
     conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+_COOKIE_CACHE = {"value": None}
+
+
+def get_cookie(conn):
+    """从 config 表读取 weibo_cookie，进程内缓存。无则返回空串。"""
+    if _COOKIE_CACHE["value"] is None:
+        row = conn.execute(
+            "SELECT value FROM config WHERE key='weibo_cookie'").fetchone()
+        _COOKIE_CACHE["value"] = row["value"] if row else ""
+    return _COOKIE_CACHE["value"]
+
+
+def _guess_content_type(path):
+    """根据文件扩展名推断 Content-Type，用于媒体文件返回。"""
+    ct, _ = mimetypes.guess_type(path)
+    return ct or "application/octet-stream"
 
 
 # ---------- 查询函数 ----------
