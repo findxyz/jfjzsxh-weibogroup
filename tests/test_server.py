@@ -178,5 +178,60 @@ class MessagesCursorTest(_ServerTestBase):
         self.assertFalse(data["has_more_newer"])
 
 
+class AnchorApiTest(_ServerTestBase):
+    BASE = 1750113600000  # 2025-06-17 00:00 CST
+
+    def make_data(self, conn):
+        conn.execute("INSERT INTO groups(gid,name) VALUES(100,'群A')")
+        base = self.BASE
+        insert_messages(conn, [
+            {"mid": "d1", "gid": 100, "sender_id": 1, "text": "1", "created_at": base + 1000},
+            {"mid": "d2", "gid": 100, "sender_id": 1, "text": "2", "created_at": base + 2000},
+            {"mid": "d3", "gid": 100, "sender_id": 2, "text": "3", "created_at": base + 3000},
+            {"mid": "d4", "gid": 100, "sender_id": 1, "text": "4", "created_at": base + 86400000},  # 次日
+        ])
+
+    def test_by_date_returns_latest_of_day_ascending(self):
+        # 2025-06-17 有 d1,d2,d3；取最新 limit 条（全部），升序返回
+        path = "/api/messages/by_date?gid=100&date=2025-06-17&limit=500"
+        status, data = self._get_json(path)
+        self.assertEqual(status, 200)
+        mids = [m["mid"] for m in data["messages"]]
+        self.assertEqual(mids, ["d1", "d2", "d3"])
+        self.assertEqual(data["newest"], {"ts": self.BASE + 3000, "id": 3})
+
+    def test_by_date_limit_caps_to_latest(self):
+        # limit=2：取最新 2 条（d2,d3），升序返回
+        path = "/api/messages/by_date?gid=100&date=2025-06-17&limit=2"
+        status, data = self._get_json(path)
+        self.assertEqual(status, 200)
+        mids = [m["mid"] for m in data["messages"]]
+        self.assertEqual(mids, ["d2", "d3"])
+
+    def test_by_date_sender_filter(self):
+        path = "/api/messages/by_date?gid=100&date=2025-06-17&sender_id=2&limit=500"
+        status, data = self._get_json(path)
+        self.assertEqual(status, 200)
+        mids = [m["mid"] for m in data["messages"]]
+        self.assertEqual(mids, ["d3"])
+
+    def test_around_anchors_at_mid(self):
+        # 以 d3 为锚，取它及之前 limit 条，升序：d1,d2,d3
+        path = "/api/messages/around?gid=100&mid=d3&limit=500"
+        status, data = self._get_json(path)
+        self.assertEqual(status, 200)
+        mids = [m["mid"] for m in data["messages"]]
+        self.assertEqual(mids, ["d1", "d2", "d3"])
+        self.assertEqual(data["anchor_mid"], "d3")
+        self.assertFalse(data["has_more_older"])
+
+    def test_around_has_more_newer(self):
+        # 以 d2 为锚：d1,d2 返回，d3/d4 在后 → has_more_newer True
+        path = "/api/messages/around?gid=100&mid=d2&limit=500"
+        status, data = self._get_json(path)
+        self.assertEqual(status, 200)
+        self.assertTrue(data["has_more_newer"])
+
+
 if __name__ == "__main__":
     unittest.main()

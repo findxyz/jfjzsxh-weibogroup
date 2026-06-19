@@ -145,6 +145,60 @@ def query_messages(conn, gid, sender_id, before_ts, before_id,
             "has_more_older": has_more_older, "has_more_newer": has_more_newer}
 
 
+def _build_response(conn, msgs, gid, sender_cond, sender_params, anchor_mid=None):
+    """从升序 msgs 构造与 /api/messages 一致的响应结构。"""
+    if not msgs:
+        resp = {"messages": [], "oldest": None, "newest": None,
+                "has_more_older": False, "has_more_newer": False}
+        if anchor_mid is not None:
+            resp["anchor_mid"] = anchor_mid
+        return resp
+    oldest = {"ts": msgs[0]["created_at"], "id": msgs[0]["id"]}
+    newest = {"ts": msgs[-1]["created_at"], "id": msgs[-1]["id"]}
+    has_more_older = _has_more(
+        conn, gid, sender_cond, sender_params,
+        "AND (created_at < ? OR (created_at = ? AND id < ?))",
+        (oldest["ts"], oldest["ts"], oldest["id"]))
+    has_more_newer = _has_more(
+        conn, gid, sender_cond, sender_params,
+        "AND (created_at > ? OR (created_at = ? AND id > ?))",
+        (newest["ts"], newest["ts"], newest["id"]))
+    resp = {"messages": msgs, "oldest": oldest, "newest": newest,
+            "has_more_older": has_more_older, "has_more_newer": has_more_newer}
+    if anchor_mid is not None:
+        resp["anchor_mid"] = anchor_mid
+    return resp
+
+
+def query_by_date(conn, gid, date, sender_id, limit):
+    """取某 CST 日期最新 limit 条，反转为升序返回。"""
+    sender_cond = "AND sender_id=?" if sender_id else ""
+    sender_params = (sender_id,) if sender_id else ()
+    sql = (f"SELECT {MSG_COLUMNS} FROM messages "
+           f"WHERE gid=? AND date(datetime(created_at/1000,'unixepoch','+8 hours'))=? "
+           f"{sender_cond} ORDER BY created_at DESC, id DESC LIMIT ?")
+    rows = conn.execute(sql, (gid, date) + sender_params + (limit,)).fetchall()
+    msgs = [row_to_msg(r) for r in rows]
+    msgs.reverse()  # 反转为升序
+    return _build_response(conn, msgs, gid, sender_cond, sender_params)
+
+
+def query_around(conn, gid, mid, limit):
+    """以 mid 对应消息为锚，取它及之前 limit 条，反转为升序返回。"""
+    anchor = conn.execute(
+        f"SELECT {MSG_COLUMNS} FROM messages WHERE mid=?", (mid,)).fetchone()
+    if anchor is None:
+        return _build_response(conn, [], gid, "", (), anchor_mid=mid)
+    a = row_to_msg(anchor)
+    sql = (f"SELECT {MSG_COLUMNS} FROM messages WHERE gid=? "
+           f"AND (created_at < ? OR (created_at = ? AND id <= ?)) "
+           f"ORDER BY created_at DESC, id DESC LIMIT ?")
+    rows = conn.execute(sql, (gid, a["created_at"], a["created_at"], a["id"], limit)).fetchall()
+    msgs = [row_to_msg(r) for r in rows]
+    msgs.reverse()
+    return _build_response(conn, msgs, gid, "", (), anchor_mid=mid)
+
+
 # ---------- HTTP Handler ----------
 
 class Handler(BaseHTTPRequestHandler):
@@ -208,6 +262,17 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(query_messages(
                     conn, gid, sender_id, before_ts, before_id,
                     after_ts, after_id, limit))
+            elif path == "/api/messages/by_date":
+                gid = int(qs.get("gid", ["0"])[0])
+                date = qs.get("date", [""])[0]
+                sender_id = int(qs.get("sender_id", ["0"])[0]) or 0
+                limit = int(qs.get("limit", ["500"])[0])
+                self._send_json(query_by_date(conn, gid, date, sender_id, limit))
+            elif path == "/api/messages/around":
+                gid = int(qs.get("gid", ["0"])[0])
+                mid = qs.get("mid", [""])[0]
+                limit = int(qs.get("limit", ["500"])[0])
+                self._send_json(query_around(conn, gid, mid, limit))
             else:
                 self._send_json({"error": "not found"}, status=404)
         except Exception as e:
