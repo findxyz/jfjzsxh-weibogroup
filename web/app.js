@@ -268,8 +268,93 @@ async function selectDate(date) {
   await loadByDate(state.gid, date, state.selectedSender);
 }
 
+// ---------- 双向滚动加载 ----------
+async function loadOlder() {
+  if (!state.before || state.loadingOlder || !state.hasMoreOlder) return;
+  state.loadingOlder = true;
+  showLoadingMarker("top");
+  const myReq = state.reqId;
+  let params = `gid=${state.gid}&before_ts=${state.before.ts}&before_id=${state.before.id}&limit=${LIMIT}`;
+  if (state.selectedSender) params += `&sender_id=${state.selectedSender}`;
+  try {
+    const data = await api(`/api/messages?${params}`);
+    if (myReq !== state.reqId) return;
+    // 保持滚动位置：记录旧 scrollHeight，插入后补偿
+    const prevHeight = elMsgList.scrollHeight;
+    state.messages = data.messages.concat(state.messages);
+    state.before = data.oldest;
+    state.hasMoreOlder = data.has_more_older;
+    // 重新渲染（简单可靠，500 条开销可接受）
+    renderMessages(null);
+    elMsgList.scrollTop = elMsgList.scrollHeight - prevHeight;
+  } catch (e) {
+    elStatus.textContent = "加载更早失败：" + e.message;
+  } finally {
+    state.loadingOlder = false;
+    showLoadingMarker(null);
+  }
+}
+
+async function loadNewer() {
+  if (!state.after || state.loadingNewer || !state.hasMoreNewer) return;
+  state.loadingNewer = true;
+  showLoadingMarker("bottom");
+  const myReq = state.reqId;
+  let params = `gid=${state.gid}&after_ts=${state.after.ts}&after_id=${state.after.id}&limit=${LIMIT}`;
+  if (state.selectedSender) params += `&sender_id=${state.selectedSender}`;
+  try {
+    const data = await api(`/api/messages?${params}`);
+    if (myReq !== state.reqId) return;
+    const wasAtBottom = (elMsgList.scrollHeight - elMsgList.scrollTop - elMsgList.clientHeight) < 50;
+    state.messages = state.messages.concat(data.messages);
+    state.after = data.newest;
+    state.hasMoreNewer = data.has_more_newer;
+    renderMessages(null);
+    if (wasAtBottom) elMsgList.scrollTop = elMsgList.scrollHeight;
+  } catch (e) {
+    elStatus.textContent = "加载更新失败：" + e.message;
+  } finally {
+    state.loadingNewer = false;
+    showLoadingMarker(null);
+  }
+}
+
+let loadingMarkerTop = null, loadingMarkerBottom = null;
+function showLoadingMarker(pos) {
+  if (pos === "top") {
+    if (!loadingMarkerTop) {
+      loadingMarkerTop = document.createElement("div");
+      loadingMarkerTop.className = "loading-more";
+      loadingMarkerTop.textContent = "加载更早…";
+    }
+    if (loadingMarkerTop.parentElement !== elMsgList) elMsgList.insertBefore(loadingMarkerTop, elSentinelTop.nextSibling);
+  } else if (pos === "bottom") {
+    if (!loadingMarkerBottom) {
+      loadingMarkerBottom = document.createElement("div");
+      loadingMarkerBottom.className = "loading-more";
+      loadingMarkerBottom.textContent = "加载更新…";
+    }
+    if (loadingMarkerBottom.parentElement !== elMsgList) elMsgList.insertBefore(loadingMarkerBottom, elSentinelBottom);
+  } else {
+    if (loadingMarkerTop && loadingMarkerTop.parentElement) loadingMarkerTop.remove();
+    if (loadingMarkerBottom && loadingMarkerBottom.parentElement) loadingMarkerBottom.remove();
+  }
+}
+
+function setupSentinels() {
+  const obsTop = new IntersectionObserver((entries) => {
+    if (entries[0].isIntersecting) loadOlder();
+  }, { root: elMsgList, rootMargin: "50px" });
+  obsTop.observe(elSentinelTop);
+  const obsBottom = new IntersectionObserver((entries) => {
+    if (entries[0].isIntersecting) loadNewer();
+  }, { root: elMsgList, rootMargin: "50px" });
+  obsBottom.observe(elSentinelBottom);
+}
+
 // ---------- 初始化 ----------
 async function init() {
+  setupSentinels();
   await loadGroups();
   if (state.groups.length) {
     await selectGroup(state.groups[0].gid);
