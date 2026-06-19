@@ -268,6 +268,78 @@ async function selectDate(date) {
   await loadByDate(state.gid, date, state.selectedSender);
 }
 
+// ---------- 搜索 ----------
+const elOverlay = $("search-overlay");
+const elSearchRange = $("search-range");
+const elSearchStatus = $("search-status");
+const elSearchResults = $("search-results");
+const elSearchClose = $("search-close");
+
+function openSearch() {
+  elOverlay.hidden = false;
+  elSearch.focus();
+}
+
+function closeSearch() {
+  elOverlay.hidden = true;
+}
+
+function snippetToHtml(snippet) {
+  // \x00..\x01 包裹关键词 → <mark>
+  const esc = escapeHtml(snippet);
+  return esc.replace(/\x00/g, "<mark>").replace(/\x01/g, "</mark>");
+}
+
+async function doSearch() {
+  const q = elSearch.value.trim();
+  if (!q) return;
+  const days = parseInt(elSearchRange.value, 10);
+  elSearchStatus.textContent = "搜索中…";
+  elSearchResults.innerHTML = "";
+  try {
+    const data = await api(`/api/search?gid=${state.gid}&q=${encodeURIComponent(q)}&days=${days}&limit=200`);
+    const results = data.results || [];
+    if (!results.length) {
+      elSearchStatus.textContent = "未找到匹配消息";
+      return;
+    }
+    elSearchStatus.textContent = `共 ${results.length} 条结果` + (results.length >= 200 ? "（已达上限，请缩小范围）" : "");
+    elSearchResults.innerHTML = "";
+    for (const r of results) {
+      const div = document.createElement("div");
+      div.className = "search-result";
+      div.innerHTML = `<div class="sr-meta"><span class="sender">${escapeHtml(r.sender_name)}</span><span>${fmtDate(r.created_at)} ${fmtTime(r.created_at)}</span></div><div class="sr-snippet">${snippetToHtml(r.snippet)}</div>`;
+      div.onclick = () => jumpToMessage(r.mid);
+      elSearchResults.appendChild(div);
+    }
+  } catch (e) {
+    elSearchStatus.textContent = "搜索失败：" + e.message;
+  }
+}
+
+async function jumpToMessage(mid) {
+  closeSearch();
+  const myReq = ++state.reqId;
+  elStatus.textContent = "定位中…";
+  const data = await api(`/api/messages/around?gid=${state.gid}&mid=${encodeURIComponent(mid)}&limit=${LIMIT}`);
+  if (myReq !== state.reqId) return;
+  state.messages = data.messages;
+  state.before = data.oldest;
+  state.after = data.newest;
+  state.hasMoreOlder = data.has_more_older;
+  state.hasMoreNewer = data.has_more_newer;
+  renderMessages(mid);
+  // 滚到命中消息
+  const target = elMsgList.querySelector(`[data-mid="${CSS.escape(mid)}"]`);
+  if (target) target.scrollIntoView({ block: "center" });
+  // 左栏同步到命中消息所在日
+  if (state.messages.length) {
+    const hit = state.messages.find(m => m.mid === mid) || state.messages[state.messages.length - 1];
+    highlightDate(cstDate(hit.created_at));
+  }
+  elStatus.textContent = `已定位，共 ${state.messages.length} 条`;
+}
+
 // ---------- 双向滚动加载 ----------
 async function loadOlder() {
   if (!state.before || state.loadingOlder || !state.hasMoreOlder) return;
@@ -373,5 +445,16 @@ elSender.onchange = () => {
 elDatePicker.onchange = () => {
   if (elDatePicker.value) selectDate(elDatePicker.value);
 };
+
+// 搜索事件绑定
+elSearch.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); openSearch(); doSearch(); }
+});
+elSearchRange.onchange = doSearch;
+elSearchClose.onclick = closeSearch;
+elOverlay.addEventListener("click", (e) => { if (e.target === elOverlay) closeSearch(); });
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !elOverlay.hidden) closeSearch();
+});
 
 init();
