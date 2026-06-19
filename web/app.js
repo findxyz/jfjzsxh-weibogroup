@@ -30,6 +30,11 @@ const elRange = $("range-indicator");
 const elEmpty = $("empty-hint");
 const elSentinelTop = $("sentinel-top");
 const elSentinelBottom = $("sentinel-bottom");
+const elLightbox = $("lightbox");
+const elLbStage = document.querySelector(".lightbox-stage");
+const elLbStatus = document.querySelector(".lightbox-status");
+const elLbClose = document.querySelector(".lightbox-close");
+const elLbBackdrop = document.querySelector(".lightbox-backdrop");
 
 // ---------- API ----------
 async function api(path) {
@@ -90,12 +95,22 @@ function renderMessageBody(m) {
     return linkify(text);
   }
   if (mt === 0) return linkify(text);
-  if (mt === 1) return `🖼 [图片]${link}`;
+  if (mt === 1) {
+    return m.fid
+      ? `<div class="media-ph" data-fid="${escapeHtml(m.fid)}" data-mtype="1"><span class="media-icon">🖼</span><span>图片</span></div>`
+      : `🖼 [图片]${link}`;
+  }
   if (mt === 5) return `📎 [文件]${link}`;
-  if (mt === 10) return `🎬 [视频]${link}`;
+  if (mt === 10) {
+    return m.fid
+      ? `<div class="media-ph" data-fid="${escapeHtml(m.fid)}" data-mtype="10"><span class="media-icon">🎬</span><span>视频</span></div>`
+      : `🎬 [视频]${link}`;
+  }
   if (mt === 13) {
     if ((m.text || "").includes("红包")) return `🧧 [红包]${link}`;
-    return `🎬 [视频]${link}`;
+    return m.fid
+      ? `<div class="media-ph" data-fid="${escapeHtml(m.fid)}" data-mtype="10"><span class="media-icon">🎬</span><span>视频</span></div>`
+      : `🎬 [视频]${link}`;
   }
   if (mt === 14) return `${linkify(text)} <span class="tag">[链接]</span>`;
   if (mt === 15) return `${linkify(text)} <span class="tag">[小程序]</span>`;
@@ -391,20 +406,46 @@ async function loadOlder() {
   try {
     const data = await api(`/api/messages?${params}`);
     if (myReq !== state.reqId) return;
-    // 保持滚动位置：记录旧 scrollHeight，插入后补偿
-    const prevHeight = elMsgList.scrollHeight;
+    // 锚点定位法保持滚动位置：渲染前记录视口顶部附近的消息元素相对容器的偏移，
+    // 渲染后定位到同一元素，使视口内容不跳动。比高度差补偿更稳健，不受
+    // loading 标记等任何高度变化干扰。用 getBoundingClientRect 不依赖 offsetParent。
+    const anchor = firstVisibleMsg();
+    const oldRect = anchor
+      ? anchor.el.getBoundingClientRect().top - elMsgList.getBoundingClientRect().top
+      : 0;
     state.messages = data.messages.concat(state.messages);
     state.before = data.oldest;
     state.hasMoreOlder = data.has_more_older;
-    // 重新渲染（简单可靠，500 条开销可接受）
     renderMessages(null);
-    elMsgList.scrollTop = elMsgList.scrollHeight - prevHeight;
+    if (anchor) {
+      const same = elMsgList.querySelector(`[data-mid="${CSS.escape(anchor.mid)}"]`);
+      if (same) {
+        const newRect = same.getBoundingClientRect().top - elMsgList.getBoundingClientRect().top;
+        elMsgList.scrollTop += newRect - oldRect;
+      }
+    }
   } catch (e) {
     elStatus.textContent = "加载更早失败：" + e.message;
   } finally {
     state.loadingOlder = false;
     showLoadingMarker(null);
   }
+}
+
+// 找到当前视口顶部第一个可见的消息元素（含系统消息），返回 {el, mid}。
+// 用于上滑加载前锚定阅读位置，渲染后恢复。用 getBoundingClientRect 判定可见性。
+function firstVisibleMsg() {
+  const containerTop = elMsgList.getBoundingClientRect().top;
+  let best = null;
+  for (const el of elMsgList.querySelectorAll("[data-mid]")) {
+    // 元素底部超过容器顶部即视为进入视口；记录首个及它之前最后一个
+    if (el.getBoundingClientRect().bottom > containerTop) {
+      best = el;
+      break;
+    }
+    best = el;
+  }
+  return best ? { el: best, mid: best.dataset.mid } : null;
 }
 
 async function loadNewer() {
@@ -454,6 +495,66 @@ function showLoadingMarker(pos) {
   }
 }
 
+// ---------- 图片/视频放大查看 ----------
+let lbCurrent = null; // 'img' | 'video' | null
+
+function openLightbox(loading) {
+  elLbStage.innerHTML = "";
+  elLbStatus.textContent = loading ? "加载中…" : "";
+  elLbStatus.className = "lightbox-status";
+  elLightbox.classList.remove("hidden");
+}
+
+function closeLightbox() {
+  const v = elLbStage.querySelector("video");
+  if (v) { v.pause(); v.removeAttribute("src"); v.load(); }
+  elLbStage.innerHTML = "";
+  elLbStatus.textContent = "";
+  elLbStatus.className = "lightbox-status";
+  elLightbox.classList.add("hidden");
+  lbCurrent = null;
+}
+
+function openImage(fid) {
+  lbCurrent = "img";
+  openLightbox(true);
+  const img = new Image();
+  img.onload = () => {
+    if (lbCurrent !== "img") return;
+    elLbStage.innerHTML = "";
+    elLbStage.appendChild(img);
+    elLbStatus.textContent = "";
+  };
+  img.onerror = () => {
+    if (lbCurrent !== "img") return;
+    elLbStage.innerHTML = "";
+    elLbStatus.innerHTML = "加载失败<button class='retry-btn' type='button'>重试</button>";
+    elLbStatus.querySelector(".retry-btn").onclick = () => openImage(fid);
+  };
+  img.src = `/api/media/${encodeURIComponent(fid)}?t=${Date.now()}`;
+}
+
+function openVideo(fid) {
+  lbCurrent = "video";
+  openLightbox(true);
+  const v = document.createElement("video");
+  v.controls = true;
+  v.autoplay = true;
+  v.oncanplay = () => {
+    if (lbCurrent !== "video") return;
+    elLbStatus.textContent = "";
+  };
+  v.onerror = () => {
+    if (lbCurrent !== "video") return;
+    elLbStage.innerHTML = "";
+    elLbStatus.innerHTML = "加载失败<button class='retry-btn' type='button'>重试</button>";
+    elLbStatus.querySelector(".retry-btn").onclick = () => openVideo(fid);
+  };
+  v.src = `/api/media/${encodeURIComponent(fid)}?t=${Date.now()}`;
+  elLbStage.innerHTML = "";
+  elLbStage.appendChild(v);
+}
+
 function setupSentinels() {
   // rootMargin 提前预加载：用 100%（相对滚动容器可见高度）而非固定像素，
   // 这样大屏/小屏都能"提前约一屏"触发，避免固定 800px 在大屏上显得太晚。
@@ -480,6 +581,23 @@ async function init() {
 }
 
 // 事件绑定
+// 媒体占位框点击（事件委托）
+elMsgList.addEventListener("click", (e) => {
+  const ph = e.target.closest(".media-ph");
+  if (!ph) return;
+  const fid = ph.dataset.fid;
+  const mtype = ph.dataset.mtype;
+  if (mtype === "1") openImage(fid);
+  else if (mtype === "10") openVideo(fid);
+});
+
+// lightbox 关闭
+elLbClose.onclick = closeLightbox;
+elLbBackdrop.addEventListener("click", closeLightbox);
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !elLightbox.classList.contains("hidden")) closeLightbox();
+});
+
 elGroup.onchange = () => selectGroup(parseInt(elGroup.value, 10));
 
 elDatePicker.onchange = () => {

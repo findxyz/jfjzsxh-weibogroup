@@ -5,8 +5,9 @@ import socket
 import sqlite3
 import threading
 import unittest
+from unittest import mock
 
-from tests.conftest import make_test_db, insert_messages
+from tests.conftest import make_test_db, insert_messages, insert_media_files, set_config
 import server
 
 
@@ -338,6 +339,118 @@ class SearchApiTest(_ServerTestBase):
         status, data = self._get_json(path)
         self.assertEqual(status, 200)
         self.assertEqual(data["results"], [])
+
+
+class MediaApiTest(_ServerTestBase):
+    def make_data(self, conn):
+        set_config(conn, "weibo_cookie", "FAKE_COOKIE=1")
+
+    def _get(self, path):
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        conn.request("GET", path)
+        resp = conn.getresponse()
+        body = resp.read()
+        self._last_content_type = resp.getheader("Content-Type")
+        conn.close()
+        return resp.status, body
+
+    def _get_json(self, path):
+        status, body = self._get(path)
+        return status, json.loads(body.decode("utf-8"))
+
+    def test_media_not_found(self):
+        status, body = self._get_json("/api/media/nonexistent_fid")
+        self.assertEqual(status, 404)
+        self.assertIn("not found", body["error"])
+
+    def test_media_cached_returns_file(self):
+        import tempfile
+        fd, img_path = tempfile.mkstemp(suffix=".jpg")
+        os.write(fd, b"\xff\xd8\xff\xe0FAKEJPEG")
+        os.close(fd)
+        self.addCleanup(os.remove, img_path)
+
+        conn = sqlite3.connect(self.db_path)
+        insert_media_files(conn, [{
+            "fid": "img_cached", "gid": 1, "mid": "m1", "media_type": 1,
+            "orig_url": "http://example.com/img", "local_path": img_path,
+            "status": "done", "created_at": 0,
+        }])
+        conn.close()
+
+        status, body = self._get("/api/media/img_cached")
+        self.assertEqual(status, 200)
+        self.assertIn("image/jpeg", self._last_content_type)
+        self.assertTrue(body.startswith(b"\xff\xd8"))
+
+    def test_media_download_on_demand(self):
+        import tempfile
+        fd, new_path = tempfile.mkstemp(suffix=".jpg")
+        os.write(fd, b"\xff\xd8DOWNLOADED")
+        os.close(fd)
+        self.addCleanup(os.remove, new_path)
+
+        conn = sqlite3.connect(self.db_path)
+        insert_media_files(conn, [{
+            "fid": "img_dl", "gid": 1, "mid": "m2", "media_type": 1,
+            "orig_url": "http://example.com/img_dl", "local_path": "",
+            "status": "pending", "created_at": 0,
+        }])
+        conn.close()
+
+        with mock.patch("weibo_im.media.download_file",
+                        return_value={"status": "done", "local_path": new_path,
+                                      "file_size": 12, "md5": "abc"}):
+            status, body = self._get("/api/media/img_dl")
+        self.assertEqual(status, 200)
+        self.assertIn("image/jpeg", self._last_content_type)
+
+        # 验证 DB 已回写
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        r = conn.execute("SELECT local_path, status FROM media_files WHERE fid='img_dl'").fetchone()
+        self.assertEqual(r["status"], "done")
+        self.assertEqual(r["local_path"], new_path)
+        conn.close()
+
+    def test_media_download_fails(self):
+        conn = sqlite3.connect(self.db_path)
+        insert_media_files(conn, [{
+            "fid": "img_fail", "gid": 1, "mid": "m3", "media_type": 1,
+            "orig_url": "http://example.com/fail", "local_path": "",
+            "status": "pending", "created_at": 0,
+        }])
+        conn.close()
+
+        with mock.patch("weibo_im.media.download_file",
+                        return_value={"status": "failed", "local_path": "",
+                                      "file_size": 0, "md5": ""}):
+            status, body = self._get_json("/api/media/img_fail")
+        self.assertEqual(status, 404)
+        self.assertIn("download failed", body["error"])
+
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        r = conn.execute("SELECT status FROM media_files WHERE fid='img_fail'").fetchone()
+        self.assertEqual(r["status"], "failed")
+        conn.close()
+
+    def test_media_static_path_traversal(self):
+        status, body = self._get("/media/../../../etc/passwd")
+        self.assertIn(status, (403, 404))
+
+    def test_media_static_serves_file(self):
+        import os
+        img_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "media", "images")
+        os.makedirs(img_dir, exist_ok=True)
+        fpath = os.path.join(img_dir, "_test_static.jpg")
+        with open(fpath, "wb") as f:
+            f.write(b"\xff\xd8STATIC")
+        self.addCleanup(os.remove, fpath)
+
+        status, body = self._get("/media/images/_test_static.jpg")
+        self.assertEqual(status, 200)
+        self.assertIn("image", self._last_content_type)
 
 
 if __name__ == "__main__":
