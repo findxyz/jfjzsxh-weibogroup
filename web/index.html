@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>微博群聊消息查看器</title>
+  <link rel="stylesheet" href="/web/style.css">
+</head>
+<body>
+  <div id="topbar">
+    <label class="field-label">群：<select id="group-select" title="选择群"></select></label>
+    <button id="search-btn" type="button" title="打开发送者 / 关键词搜索">🔍 高级搜索</button>
+    <span id="status">加载中…</span>
+  </div>
+
+  <div id="main">
+    <aside id="sidebar">
+      <div id="date-jump">
+        <label class="field-label">跳转日期：<input id="date-picker" type="date"></label>
+      </div>
+      <div id="date-list"></div>
+    </aside>
+
+    <section id="viewer">
+      <div id="range-indicator"></div>
+      <div id="message-list">
+        <div id="sentinel-top"></div>
+        <div id="sentinel-bottom"></div>
+      </div>
+      <div id="empty-hint" hidden></div>
+    </section>
+  </div>
+
+  <!-- 高级搜索浮层 -->
+  <div id="search-overlay" hidden>
+    <div id="search-panel">
+      <div id="search-panel-head">
+        <span>高级搜索</span>
+        <button id="search-close" type="button">×</button>
+      </div>
+      <div class="search-fields">
+        <input id="search-sender" type="text" placeholder="发送者名称（精确匹配，可选）" autocomplete="off">
+        <input id="search-keyword" type="search" placeholder="关键词（模糊匹配，可选）" autocomplete="off">
+        <button id="search-submit" type="button">搜索</button>
+      </div>
+      <div class="search-fields">
+        <label class="field-label">起止日期：
+          <input id="search-start" type="date">
+          <span class="date-sep-inline">至</span>
+          <input id="search-end" type="date">
+        </label>
+      </div>
+      <div id="search-status"></div>
+      <div id="search-results"></div>
+    </div>
+  </div>
+
+  <script src="/web/app.js"></script>
+</body>
+</html>

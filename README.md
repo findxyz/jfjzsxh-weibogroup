@@ -306,3 +306,39 @@ python crawl.py --download                  # ⑦ 下载媒体
 ```
 
 任何一步报错，对照第 8 节排查。
+
+---
+
+## 11. 消息查看器（web 前端）
+
+本地只读 web 查看器，浏览已抓取的群聊消息。零外部依赖，仅用 Python 标准库
++ 原生 HTML/JS/CSS。
+
+### 启动
+
+```bash
+python server.py
+```
+
+默认访问 http://127.0.0.1:8765 。可选参数：`--db`（数据库路径，默认同目录
+`weibo_im.db`）、`--host`、`--port`。
+
+### 功能
+
+- 左栏按月折叠的日期列表（带每天消息数），点某天查看当天消息，最新在底
+- 右栏聊天视图，向上 / 向下滚动加载更早 / 更新消息（每页 100 条，`(created_at, id)` 游标分页），加载时有 loading 提示
+- 顶栏「高级搜索」按钮打开模态窗：可填发送者名称（精确匹配，可选）和 / 或关键词（模糊 `LIKE`，可选），两者 AND；结果先在窗内列出，点击跳转到主窗以命中消息为锚的上下文（命中及之前 100 条），可继续上下翻看
+- 搜索时间范围默认最近 3 个月，可缩为 1 周 / 1 个月
+- 媒体仅显示占位与原始链接（需带 cookie 才能访问，不在页面内加载）
+- 跨天日期分隔条；系统消息（入群 / 撤回等）居中灰色显示
+
+### 设计与实现文档
+
+- 设计规格：`docs/superpowers/specs/2026-06-19-weibo-im-message-viewer-design.md`
+- 实现计划：`docs/superpowers/plans/2026-06-19-weibo-im-message-viewer.md`
+
+### 测试
+
+```bash
+python -m unittest discover tests
+```
