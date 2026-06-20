@@ -62,6 +62,7 @@ body { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
   display: inline-block; max-width: 80%; word-break: break-word; white-space: pre-wrap; }
 .msg-body a { color: #1a73e8; }
 .tag { color: #1a73e8; font-size: 12px; margin-left: 4px; }
+.tag a { font-size: inherit; color: inherit; }
 
 .msg-system {
   text-align: center; color: #999; font-size: 12px; margin: 8px 0;

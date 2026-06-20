@@ -89,7 +89,9 @@ function renderMessageBody(m) {
   const mt = m.media_type;
   const text = escapeHtml(m.text || "");
   const url = m.media_orig_url || "";
-  const link = url ? ` <a href="${escapeHtml(url)}" target="_blank" rel="noopener">[链接]</a>` : "";
+  const link = url
+    ? ` <span class="tag"><a href="${escapeHtml(url)}" target="_blank" rel="noopener">[链接]</a></span>`
+    : "";
   if (m.msg_type !== 321 && m.msg_type !== 100) {
     // 系统消息（居中由外层处理），body 即文本
     return linkify(text);
