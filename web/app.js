@@ -275,6 +275,11 @@ async function loadByDate(gid, date) {
   // 滚到底（最新在底）
   elMsgList.scrollTop = elMsgList.scrollHeight;
   elStatus.textContent = "";
+  // 滚到底后，若有更新内容则立即显式加载下一页，便于用户直接下滑查看。
+  // 不依赖底部 IntersectionObserver 异步触发——renderMessages 会移除并重新
+  // 挂载底部哨兵，观察者回调时机不稳定。loadNewer 内部有 loadingNewer/
+  // hasMoreNewer 同步守卫，与观察者触发的调用互斥，不会重复请求。
+  if (state.hasMoreNewer) loadNewer();
 }
 
 // ---------- 选择操作 ----------
