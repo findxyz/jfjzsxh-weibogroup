@@ -2,7 +2,8 @@
 
 把微博群聊消息抓取到本地 SQLite 数据库的工具。基于原始的 WeiboChatToWeChat
 方案改造而成，**去除了对 Hermes / 微信的依赖**，可在本机直接命令行运行，
-数据全部落在本地。
+数据全部落在本地。同源还有 [WeiboBlogCrawler](https://github.com/findxyz/jfjzsxh-weiboblog)（博主博文爬虫），
+技术栈一致、互不依赖，各自独立数据库。
 
 - 定时增量爬取群聊消息（手动运行或交给系统计划任务）
 - Playwright 扫码登录微博 → 自动提取 cookie（截图保存到本地，扫码弹窗/图片任选）
