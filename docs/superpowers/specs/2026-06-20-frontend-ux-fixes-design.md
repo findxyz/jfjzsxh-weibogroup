@@ -35,6 +35,19 @@ if (state.hasMoreNewer) loadNewer();
 
 `setupSentinels` 的底部观察者**保留不动**，继续负责用户手动下滑到接近底部时的预加载。两条路径通过 `state.loadingNewer` 守卫互斥，不会重复请求。
 
+### 防重复与级联加载说明
+
+**不会重复加载同一批数据**，由两层机制保证：
+
+1. **同步守卫互斥**：`loadNewer()` 入口检查 `state.loadingNewer` 并立即置 `true`，二者之间无 `await`。无论点日期后的显式调用与观察者异步回调谁先谁后执行，只有一个调用能进入函数体，其余在首行 return。时序如下：
+   - `loadByDate` 滚到底 → 底部哨兵进入视口，观察者把回调排入异步任务队列（尚未执行）。
+   - `loadByDate` 紧接着显式调用 `loadNewer()` → 守卫通过，置 `loadingNewer = true`，`await` 请求让出执行权。
+   - 观察者回调此时执行 → 调 `loadNewer()` → 撞 `loadingNewer === true` → return，不发请求。
+   - 显式加载完成，`finally` 置 `loadingNewer = false`。
+2. **游标前进**：每次 `loadNewer()` 成功后 `state.after = data.newest`。即使两次调用都进入函数体（实际不会），所用 `after_ts` 不同，取的是不同页，不会拿到重复数据。
+
+**级联预加载（非重复，保留现状）**：显式那次加载完成后，若新追加内容很少、底部哨兵仍在观察者 rootMargin 触发区内，观察者会再触发一次加载——但加载的是下一页（游标已前进），受 `hasMoreNewer` 兜底。这与现有手动下滑时的"提前预加载一屏"语义一致，能让点日期后底部尽快填满一屏缓冲，符合"直接下滑看新内容"的初衷，故保留，不做额外抑制。
+
 ### 影响范围
 
 仅 `web/app.js` 的 `loadByDate` 函数末尾增加 2 行。
