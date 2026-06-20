@@ -583,7 +583,7 @@ logger 命名约定：
 
 | 平台 | 工具 | 推荐 |
 |------|------|------|
-| Windows | 任务计划程序 | 每 10 分钟跑一次 `python crawl.py` |
+| Windows | 任务计划程序 | 每 10 分钟跑一次 `uv run crawl.py` |
 | Linux | cron | `*/10 * * * *` |
 | macOS | launchd | 每 600 秒 |
 

@@ -73,24 +73,22 @@ weibogroup/
 ## 3. 首次部署步骤
 
 ```bash
-# 1. 安装依赖（任选其一）
-uv sync                           # 推荐
-# 或：pip install requests urllib3 playwright
+# 1. 安装依赖
+uv sync
 
 # 2. 安装浏览器（仅扫码登录需要）
 uv run playwright install chromium
-# 或：python -m playwright install chromium
 
 # 3. 验证环境
-python crawl.py --check-playwright
+uv run crawl.py --check-playwright
 # 期望：✅ playwright Python 包可导入  /  ✅ Chromium 启动正常
 
 # 4. 扫码登录（默认有头弹窗；无桌面环境加 --headless）
-python crawl.py --renew-cookie
+uv run crawl.py --renew-cookie
 # 弹出浏览器 → 用微博 APP 扫码 → 程序自动提取 cookie 入库
 
 # 5. 首次爬取（每个群默认回填到今天零点 CST）
-python crawl.py
+uv run crawl.py
 ```
 
 扫码失败的两种退路：
@@ -99,7 +97,7 @@ python crawl.py
   从 DevTools → Application → Cookies 复制 `.weibo.com` 域下所有键值，
   拼成 `k1=v1; k2=v2` 形式，运行：
   ```
-  python crawl.py --set-cookie "SUB=xxx; SUBP=yyy; ..."
+  uv run crawl.py --set-cookie "SUB=xxx; SUBP=yyy; ..."
   ```
 
 ---
@@ -112,24 +110,24 @@ python crawl.py
 
 | 命令 | 作用 |
 |------|------|
-| `python crawl.py --renew-cookie` | Playwright 打开扫码页，扫码后自动存 cookie。默认**有头弹窗**。 |
-| `python crawl.py --renew-cookie --headless` | 无头模式：仅把二维码截图存到 `qrcode.png` 并尝试用系统默认程序打开。适合无桌面 Linux。 |
-| `python crawl.py --check-playwright` | 检查 Playwright + Chromium 是否就绪，返回 exit code 0/1。 |
-| `python crawl.py --set-cookie 'SUB=xxx; SUBP=yyy'` | 手动写入 cookie，不依赖 Playwright。 |
-| `python crawl.py --db D:\path\to.db ...` | 任何命令都可加 `--db` 指定数据库路径。 |
+| `uv run crawl.py --renew-cookie` | Playwright 打开扫码页，扫码后自动存 cookie。默认**有头弹窗**。 |
+| `uv run crawl.py --renew-cookie --headless` | 无头模式：仅把二维码截图存到 `qrcode.png` 并尝试用系统默认程序打开。适合无桌面 Linux。 |
+| `uv run crawl.py --check-playwright` | 检查 Playwright + Chromium 是否就绪，返回 exit code 0/1。 |
+| `uv run crawl.py --set-cookie 'SUB=xxx; SUBP=yyy'` | 手动写入 cookie，不依赖 Playwright。 |
+| `uv run crawl.py --db D:\path\to.db ...` | 任何命令都可加 `--db` 指定数据库路径。 |
 
 ### 4.2 爬取
 
 | 命令 | 作用 |
 |------|------|
-| `python crawl.py` | 爬取所有群的新消息。**首次**对没有记录的群默认回填到今天零点（CST）。 |
-| `python crawl.py --since 2026-01-01` | 回填到指定日期（CST）。已有记录的群会从最旧 mid 往前补到该日期。 |
-| `python crawl.py --since 2026-01-01 --gid 4761715839862414` | 只回填指定群。 |
-| `python crawl.py --since 0` | `0` 表示无下限（全部可拉历史）。 |
-| `python crawl.py --group-only` | 只刷新群列表，不爬消息。 |
-| `python crawl.py --probe-boundary` | 盲测每个群最早可爬取边界（入群时间），仅打印不入库。 |
-| `python crawl.py --probe-boundary --gid GID` | 只测指定群。 |
-| `python crawl.py --verbose` | 详细日志（DEBUG 级）。 |
+| `uv run crawl.py` | 爬取所有群的新消息。**首次**对没有记录的群默认回填到今天零点（CST）。 |
+| `uv run crawl.py --since 2026-01-01` | 回填到指定日期（CST）。已有记录的群会从最旧 mid 往前补到该日期。 |
+| `uv run crawl.py --since 2026-01-01 --gid 4761715839862414` | 只回填指定群。 |
+| `uv run crawl.py --since 0` | `0` 表示无下限（全部可拉历史）。 |
+| `uv run crawl.py --group-only` | 只刷新群列表，不爬消息。 |
+| `uv run crawl.py --probe-boundary` | 盲测每个群最早可爬取边界（入群时间），仅打印不入库。 |
+| `uv run crawl.py --probe-boundary --gid GID` | 只测指定群。 |
+| `uv run crawl.py --verbose` | 详细日志（DEBUG 级）。 |
 
 **爬取行为要点：**
 
@@ -142,8 +140,8 @@ python crawl.py
 
 | 命令 | 作用 |
 |------|------|
-| `python crawl.py --download` | 下载所有 `pending` 状态的媒体文件直到队列清空。 |
-| `python crawl.py --download-fid 5302496155143676` | 下载指定 fid 的单个媒体文件。 |
+| `uv run crawl.py --download` | 下载所有 `pending` 状态的媒体文件直到队列清空。 |
+| `uv run crawl.py --download-fid 5302496155143676` | 下载指定 fid 的单个媒体文件。 |
 
 > 爬取时**不自动下载媒体**——只把 fid/url 写入 `media_files` 表（status=`pending`）。
 > 外部链接文件（PDF/ZIP 等）由 `scan_links` 扫描近期消息识别，仅在
@@ -153,18 +151,18 @@ python crawl.py
 
 | 命令 | 作用 |
 |------|------|
-| `python crawl.py --list-groups` | 列出数据库中所有群（gid / 成员数 / 群名）。 |
-| `python crawl.py --list-skip` | 列出不爬取的群。 |
-| `python crawl.py --add-skip-gid GID` | 加入不爬取列表。 |
-| `python crawl.py --remove-skip-gid GID` | 从不爬取列表移除。 |
+| `uv run crawl.py --list-groups` | 列出数据库中所有群（gid / 成员数 / 群名）。 |
+| `uv run crawl.py --list-skip` | 列出不爬取的群。 |
+| `uv run crawl.py --add-skip-gid GID` | 加入不爬取列表。 |
+| `uv run crawl.py --remove-skip-gid GID` | 从不爬取列表移除。 |
 
 ### 4.5 查询
 
 | 命令 | 作用 |
 |------|------|
-| `python crawl.py --stats` | 打印数据库统计（消息数 / 群数 / 媒体数）。 |
-| `python crawl.py --search 关键词` | FTS5 全文搜索消息（按时间倒序）。 |
-| `python crawl.py --search 关键词 --search-limit 100` | 限制返回条数（默认 50）。 |
+| `uv run crawl.py --stats` | 打印数据库统计（消息数 / 群数 / 媒体数）。 |
+| `uv run crawl.py --search 关键词` | FTS5 全文搜索消息（按时间倒序）。 |
+| `uv run crawl.py --search 关键词 --search-limit 100` | 限制返回条数（默认 50）。 |
 
 ---
 
@@ -280,13 +278,13 @@ class Crawler(db_path, cookie=""):
 
 ```powershell
 # schtasks 创建（路径按实际调整）
-schtasks /create /tn "WeiboCrawl" /tr "cmd /c cd /d C:\Users\fixyz\Desktop\weibogroup && python crawl.py >> crawl.log 2>&1" /sc minute /mo 10
+schtasks /create /tn "WeiboCrawl" /tr "cmd /c cd /d C:\Users\fixyz\Desktop\weibogroup && uv run crawl.py >> crawl.log 2>&1" /sc minute /mo 10
 ```
 
 **Linux/macOS cron：**
 
 ```cron
-*/10 * * * * cd /path/to/weibogroup && python crawl.py >> crawl.log 2>&1
+*/10 * * * * cd /path/to/weibogroup && uv run crawl.py >> crawl.log 2>&1
 ```
 
 ---
@@ -296,13 +294,13 @@ schtasks /create /tn "WeiboCrawl" /tr "cmd /c cd /d C:\Users\fixyz\Desktop\weibo
 部署完成后，按顺序跑这几条命令确认一切就绪：
 
 ```bash
-python crawl.py --check-playwright          # ① 浏览器环境
-python crawl.py --renew-cookie              # ② 扫码登录
-python crawl.py                             # ③ 首次爬取（当天消息）
-python crawl.py --stats                     # ④ 看统计
-python crawl.py --list-groups               # ⑤ 看群列表
-python crawl.py --search 微博               # ⑥ 试搜
-python crawl.py --download                  # ⑦ 下载媒体
+uv run crawl.py --check-playwright          # ① 浏览器环境
+uv run crawl.py --renew-cookie              # ② 扫码登录
+uv run crawl.py                             # ③ 首次爬取（当天消息）
+uv run crawl.py --stats                     # ④ 看统计
+uv run crawl.py --list-groups               # ⑤ 看群列表
+uv run crawl.py --search 微博               # ⑥ 试搜
+uv run crawl.py --download                  # ⑦ 下载媒体
 ```
 
 任何一步报错，对照第 8 节排查。
@@ -317,7 +315,7 @@ python crawl.py --download                  # ⑦ 下载媒体
 ### 启动
 
 ```bash
-python server.py
+uv run server.py
 ```
 
 默认访问 http://127.0.0.1:8765 。可选参数：`--db`（数据库路径，默认同目录
@@ -340,5 +338,5 @@ python server.py
 ### 测试
 
 ```bash
-python -m unittest discover tests
+uv run python -m unittest discover tests
 ```
