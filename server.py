@@ -9,6 +9,8 @@ import json
 import mimetypes
 import os
 import sqlite3
+import subprocess
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
@@ -435,6 +437,70 @@ def query_search(conn, gid, q, sender_name, start_ts, end_ts, limit):
     return {"results": results}
 
 
+# ---------- 增量同步 ----------
+
+# 多线程 Handler 共享的同步状态：proc 非空表示有同步在跑。
+# output 始终保留最后 200 行日志，供前端轮询展示。
+_sync_state = {"proc": None, "exit_code": None, "output": []}
+_sync_lock = threading.Lock()
+_PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _sync_worker(proc):
+    """后台线程：读 crawl.py 合并输出（最后 200 行），结束后回写 exit_code。
+
+    output 在运行期间实时更新，便于前端轮询看到进度。proc 设为 None 标记
+    结束，running 即据此判定，避免与 wait() 之间存在 exit_code 空窗。
+    """
+    lines = []
+    try:
+        for line in proc.stdout:
+            lines.append(line.rstrip("\n"))
+            if len(lines) > 200:
+                del lines[:-200]
+            with _sync_lock:
+                _sync_state["output"] = list(lines)
+    finally:
+        code = proc.wait()
+    with _sync_lock:
+        _sync_state["exit_code"] = code
+        _sync_state["output"] = lines[-200:]
+        _sync_state["proc"] = None
+
+
+def _start_sync():
+    """尝试启动增量同步。返回 True 已启动；False 已有同步在跑（单飞）。
+
+    锁内做"proc 非空即拒绝"+ Popen，保证同一时刻只跑一个 crawl.py。
+    子进程用当前解释器、项目根目录为 cwd、继承环境变量。
+    """
+    with _sync_lock:
+        if _sync_state["proc"] is not None:
+            return False
+        proc = subprocess.Popen(
+            [sys.executable, "crawl.py"],
+            cwd=_PROJECT_DIR,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        _sync_state["proc"] = proc
+        _sync_state["exit_code"] = None
+        _sync_state["output"] = []
+    threading.Thread(target=_sync_worker, args=(proc,), daemon=True).start()
+    return True
+
+
+def _sync_status():
+    with _sync_lock:
+        return {
+            "running": _sync_state["proc"] is not None,
+            "exit_code": _sync_state["exit_code"],
+            "output": "\n".join(_sync_state["output"]),
+        }
+
+
 # ---------- HTTP Handler ----------
 
 class Handler(BaseHTTPRequestHandler):
@@ -503,7 +569,21 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._send_text("Not Found", status=404)
 
+    def do_POST(self):
+        parsed = urlparse(self.path)
+        path = parsed.path
+        if path == "/api/sync":
+            if _start_sync():
+                self._send_json({"status": "started"}, status=202)
+            else:
+                self._send_json({"error": "sync already running"}, status=409)
+            return
+        self._send_text("Not Found", status=404)
+
     def _route_api(self, path, qs):
+        if path == "/api/sync/status":
+            self._send_json(_sync_status())
+            return
         conn = self.conn
         try:
             if path == "/api/groups":

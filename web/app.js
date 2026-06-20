@@ -22,6 +22,7 @@ const LIMIT = 100;
 const $ = (id) => document.getElementById(id);
 const elGroup = $("group-select");
 const elSearchBtn = $("search-btn");
+const elSyncBtn = $("sync-btn");
 const elStatus = $("status");
 const elDateList = $("date-list");
 const elDatePicker = $("date-picker");
@@ -625,5 +626,46 @@ elOverlay.addEventListener("click", (e) => { if (e.target === elOverlay) closeSe
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && !elOverlay.hidden) closeSearch();
 });
+
+// ---------- 同步 ----------
+let syncPollTimer = null;
+
+elSyncBtn.addEventListener("click", async () => {
+  elSyncBtn.disabled = true;
+  elSyncBtn.textContent = "同步中...";
+  try {
+    const resp = await fetch("/api/sync", { method: "POST" });
+    // 202 = 已启动；409 = 已有同步在跑，直接转入轮询
+    if (resp.status !== 202 && resp.status !== 409) {
+      throw new Error("同步启动失败");
+    }
+  } catch (e) {
+    elSyncBtn.disabled = false;
+    elSyncBtn.textContent = "🔄 同步";
+    elStatus.textContent = "同步启动失败";
+    return;
+  }
+  syncPollTimer = setInterval(pollSync, 2000);
+  pollSync();
+});
+
+async function pollSync() {
+  try {
+    const data = await (await fetch("/api/sync/status")).json();
+    if (!data.running) {
+      clearInterval(syncPollTimer);
+      syncPollTimer = null;
+      if (data.exit_code === 0) {
+        location.reload();
+      } else {
+        elSyncBtn.disabled = false;
+        elSyncBtn.textContent = "🔄 同步";
+        elStatus.textContent = "同步失败（exit " + data.exit_code + "），请查看日志";
+      }
+    }
+  } catch (e) {
+    // 网络错误，继续轮询
+  }
+}
 
 init();

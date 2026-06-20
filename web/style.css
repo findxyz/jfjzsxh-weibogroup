@@ -16,6 +16,13 @@ body { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
   display: inline-flex; align-items: center; justify-content: center;
 }
 #search-btn:hover { background: #1557b0; }
+#sync-btn {
+  padding: 0 12px; height: 28px; cursor: pointer; background: #6c757d; color: #fff;
+  border: none; border-radius: 4px; font-size: 13px; line-height: 1;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+#sync-btn:hover:not(:disabled) { background: #5a6268; }
+#sync-btn:disabled { background: #adb5bd; cursor: not-allowed; }
 #status { margin-left: auto; color: #888; font-size: 13px; }
 
 #main { flex: 1; display: flex; min-height: 0; }
