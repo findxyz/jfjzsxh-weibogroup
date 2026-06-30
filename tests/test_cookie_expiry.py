@@ -1,4 +1,7 @@
 import logging
+import runpy
+import sys
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -84,26 +87,54 @@ def test_crawl_all_does_not_swallow_cookie_expiry():
             crawler.crawl_all()
 
 
-def test_cli_reports_renew_only_for_cookie_expiry(caplog):
-    with patch.object(
-        crawl,
-        "main",
-        side_effect=crawler_module.CookieExpiredError("expired"),
-    ), caplog.at_level(logging.ERROR):
+def test_script_entrypoint_reports_renew_only_for_cookie_expiry(
+    caplog, tmp_path
+):
+    class ExpiredCrawler:
+        def __init__(self, db_path):
+            pass
+
+        def sync_groups(self):
+            raise crawler_module.CookieExpiredError("expired")
+
+    script = Path(__file__).parents[1] / "crawl.py"
+    db_path = tmp_path / "test.db"
+    with patch.object(crawler_module, "Crawler", ExpiredCrawler), \
+         patch.object(
+             sys,
+             "argv",
+             ["crawl.py", "--db", str(db_path), "--group-only"],
+         ), caplog.at_level(logging.ERROR):
         with pytest.raises(SystemExit) as exc:
-            crawl.cli()
+            runpy.run_path(str(script), run_name="__main__")
 
     assert exc.value.code == 2
     assert "uv run crawl.py --renew-cookie" in caplog.text
 
 
-def test_cli_does_not_report_renew_for_unrelated_error(caplog):
-    with patch.object(
-        crawl,
-        "main",
-        side_effect=RuntimeError("network error"),
-    ), caplog.at_level(logging.ERROR):
+def test_script_entrypoint_does_not_report_renew_for_unrelated_error(
+    caplog, tmp_path
+):
+    class BrokenCrawler:
+        def __init__(self, db_path):
+            pass
+
+        def sync_groups(self):
+            raise RuntimeError("network error")
+
+    script = Path(__file__).parents[1] / "crawl.py"
+    db_path = tmp_path / "test.db"
+    with patch.object(crawler_module, "Crawler", BrokenCrawler), \
+         patch.object(
+             sys,
+             "argv",
+             ["crawl.py", "--db", str(db_path), "--group-only"],
+         ), caplog.at_level(logging.ERROR):
         with pytest.raises(RuntimeError):
-            crawl.cli()
+            runpy.run_path(str(script), run_name="__main__")
 
     assert "--renew-cookie" not in caplog.text
+
+
+def test_module_keeps_main_as_the_only_entrypoint():
+    assert not hasattr(crawl, "cli")

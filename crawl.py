@@ -463,13 +463,9 @@ def main():
              stats["messages"], stats["groups_with_msgs"], stats["media_done"])
 
 
-def cli():
+if __name__ == "__main__":
     try:
         main()
     except CookieExpiredError:
         logging.error("Cookie 已过期，请运行: uv run crawl.py --renew-cookie")
         raise SystemExit(2)
-
-
-if __name__ == "__main__":
-    cli()
