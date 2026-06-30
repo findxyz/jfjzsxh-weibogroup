@@ -8,6 +8,7 @@ import random
 import logging
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from urllib.parse import urlparse
 
 import requests
 import urllib3
@@ -26,6 +27,28 @@ log = logging.getLogger("weibo_im.crawler")
 API_BASE = "https://api.weibo.com"
 SOURCE = "209678993"
 CST = timezone(timedelta(hours=8))
+
+
+class CookieExpiredError(RuntimeError):
+    """微博明确返回 Cookie 鉴权失效时抛出。"""
+
+
+def _response_json(resp) -> dict:
+    """解析响应；仅明确登录跳转或 21301 才判定 Cookie 过期。"""
+    final_url = getattr(resp, "url", "")
+    if isinstance(final_url, str):
+        parsed = urlparse(final_url)
+        host = parsed.hostname or ""
+        path = parsed.path.lower()
+        if host in {"login.sina.com.cn", "passport.weibo.com"} or (
+            host in {"weibo.com", "www.weibo.com"} and path.startswith("/login")
+        ):
+            raise CookieExpiredError("微博 Cookie 已过期")
+
+    data = resp.json()
+    if str(data.get("error_code", "")) == "21301":
+        raise CookieExpiredError("微博 Cookie 已过期")
+    return data
 
 
 def _midnight_today_ms() -> int:
@@ -135,7 +158,7 @@ def fetch_contacts(session: requests.Session) -> list[dict]:
         timeout=15,
     )
     resp.raise_for_status()
-    data = resp.json()
+    data = _response_json(resp)
     groups = []
     for c in data.get("contacts", []):
         user = c.get("user", {})
@@ -187,9 +210,9 @@ def fetch_messages(session: requests.Session, gid: int,
         timeout=15,
     )
     resp.raise_for_status()
-    data = resp.json()
+    data = _response_json(resp)
     if not data.get("result"):
-        log.warning("[群%s] query_messages 返回 result=false (可能被限流或 cookie 过期)", gid)
+        log.warning("[群%s] query_messages 返回 result=false (接口拒绝或暂时不可用)", gid)
         return []
     return data.get("messages", [])
 
@@ -415,6 +438,8 @@ class Crawler:
                     total_media += result["media"]
                     groups_with_new += 1
                 _jitter_sleep(group_interval, 0.15)
+            except CookieExpiredError:
+                raise
             except Exception as e:
                 log.warning("  ✗ [%s] 错误: %s", g["name"], e)
                 _jitter_sleep(group_interval, 0.15)

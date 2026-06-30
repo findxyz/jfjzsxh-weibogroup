@@ -34,7 +34,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from weibo_im.crawler import Crawler
+from weibo_im.crawler import Crawler, CookieExpiredError
 
 CST = timezone(timedelta(hours=8))
 
@@ -448,9 +448,10 @@ def main():
         result = crawler.crawl_all(download_media=False,
                                    since_time=since_time,
                                    gid=args.gid)
+    except CookieExpiredError:
+        raise
     except Exception as e:
         log.error("爬取失败: %s", e)
-        log.error("⚠️ 微博 cookie 可能失效，请运行: python crawl.py --renew-cookie")
         return
 
     log.info("爬取完成: %d 个群, %d 个有新消息, +%d 条, %d 个媒体文件待下载",
@@ -462,5 +463,13 @@ def main():
              stats["messages"], stats["groups_with_msgs"], stats["media_done"])
 
 
+def cli():
+    try:
+        main()
+    except CookieExpiredError:
+        logging.error("Cookie 已过期，请运行: uv run crawl.py --renew-cookie")
+        raise SystemExit(2)
+
+
 if __name__ == "__main__":
-    main()
+    cli()
