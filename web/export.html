@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>数据导出 · 微博群聊消息查看器</title>
+  <link rel="stylesheet" href="/web/style.css">
+  <link rel="stylesheet" href="/web/export.css">
+</head>
+<body>
+  <div id="topbar">
+    <label class="field-label">群：
+      <select id="group-select" title="选择群"></select>
+    </label>
+    <a href="/" class="nav-link" title="返回消息查看器">← 消息查看器</a>
+    <span id="status"></span>
+  </div>
+
+  <div id="export-main">
+    <div class="tabs">
+      <button type="button" class="tab active" data-tab="member">成员发言导出</button>
+      <button type="button" class="tab" data-tab="daily">每日群聊日报</button>
+      <button type="button" class="tab" data-tab="diff">增量对比</button>
+    </div>
+
+    <!-- 成员发言导出 -->
+    <section class="tab-panel active" id="tab-member">
+      <div class="form-card">
+        <label class="form-row">
+          <span class="form-label">成员</span>
+          <select id="member-select-member" title="选择成员"></select>
+        </label>
+        <div class="form-row form-row-inline">
+          <span class="form-label">时间范围</span>
+          <input type="date" id="since-member" title="起始日期（含当天）">
+          <span class="date-sep">至</span>
+          <input type="date" id="until-member" title="结束日期（含当天）">
+          <span class="form-hint">留空 = 不限</span>
+        </div>
+        <div class="form-row form-row-inline">
+          <span class="form-label">格式</span>
+          <label class="radio-label"><input type="radio" name="fmt" value="json" checked> JSON</label>
+          <label class="radio-label"><input type="radio" name="fmt" value="csv"> CSV</label>
+          <label class="checkbox-label" id="compact-wrap" title="紧凑模式：去除缩进和空格，减小体积">
+            <input type="checkbox" id="compact-check"> 紧凑模式
+          </label>
+        </div>
+        <div class="form-row">
+          <button type="button" id="export-member-btn" class="primary-btn">导出</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- 每日群聊日报 -->
+    <section class="tab-panel" id="tab-daily">
+      <div class="form-card">
+        <label class="form-row">
+          <span class="form-label">目标成员</span>
+          <select id="member-select-daily" title="选择目标成员"></select>
+          <span class="form-hint">留空 = 仅导出当日群聊上下文（无目标标记）</span>
+        </label>
+        <label class="form-row">
+          <span class="form-label">日期</span>
+          <input type="date" id="date-daily" title="选择日期">
+        </label>
+        <div class="form-row">
+          <button type="button" id="export-daily-btn" class="primary-btn">导出日报</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- 增量对比 -->
+    <section class="tab-panel" id="tab-diff">
+      <div class="form-card">
+        <div class="diff-files-row">
+          <div class="diff-file-slot" id="diff-old-slot">
+            <div class="diff-file-label">旧数据包（上次导出）</div>
+            <label class="diff-file-pick">
+              <input type="file" id="diff-old-file" accept=".json,.csv" hidden>
+              <span class="diff-file-btn">选择文件…</span>
+            </label>
+            <div class="diff-file-name" id="diff-old-name">未选择</div>
+            <div class="diff-file-meta" id="diff-old-meta"></div>
+          </div>
+          <div class="diff-file-slot" id="diff-new-slot">
+            <div class="diff-file-label">新数据包（本次导出）</div>
+            <label class="diff-file-pick">
+              <input type="file" id="diff-new-file" accept=".json,.csv" hidden>
+              <span class="diff-file-btn">选择文件…</span>
+            </label>
+            <div class="diff-file-name" id="diff-new-name">未选择</div>
+            <div class="diff-file-meta" id="diff-new-meta"></div>
+          </div>
+        </div>
+        <div class="form-row form-row-inline">
+          <span class="form-label">补充包格式</span>
+          <label class="radio-label"><input type="radio" name="diff-fmt" value="json" checked> JSON</label>
+          <label class="radio-label"><input type="radio" name="diff-fmt" value="csv"> CSV</label>
+          <span class="form-hint">与 --export 格式一致，可直接上传 NotebookLM</span>
+        </div>
+        <div class="form-row">
+          <button type="button" id="diff-btn" class="primary-btn">开始对比</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- 结果展示 -->
+    <section id="result-area" hidden>
+      <div class="result-meta" id="result-meta"></div>
+      <div class="result-actions">
+        <button type="button" id="download-btn" class="primary-btn">下载文件</button>
+      </div>
+      <div class="preview-wrap">
+        <div class="preview-title">数据预览（前 <span id="preview-count">0</span> 条）</div>
+        <div class="preview-table-wrap">
+          <table id="preview-table"></table>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <script src="/web/export.js"></script>
+</body>
+</html>

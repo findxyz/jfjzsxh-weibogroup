@@ -5,13 +5,16 @@
 """
 import argparse
 import calendar
+import csv
 import json
 import mimetypes
 import os
+import secrets
 import sqlite3
 import subprocess
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
@@ -72,6 +75,10 @@ def _guess_content_type(path):
 
 _MEDIA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "media")
 _fid_locks = {}
+
+# 与 crawl.py 中的 QRCODE_PATH 保持一致（<项目根>/qrcode.png），供 /qr/ 静态访问
+QRCODE_IMAGE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "qrcode.png")
+QRCODE_FILE_NAME = "qrcode.png"
 _fid_locks_guard = threading.Lock()
 
 
@@ -147,6 +154,20 @@ def _serve_media_impl(conn, fid):
                 (new_path, row["mid"]))
         conn.commit()
         return new_path, None
+
+
+def query_members_list(conn, gid):
+    """返回群内发言过的成员列表（sender_id + sender_name），按最近发言倒序。"""
+    rows = conn.execute(
+        "SELECT sender_id, sender_name, MAX(created_at) AS last_msg_at, "
+        "COUNT(*) AS msg_count FROM messages "
+        "WHERE gid=? AND msg_type IN (100, 321) "
+        "GROUP BY sender_id ORDER BY last_msg_at DESC",
+        (gid,),
+    ).fetchall()
+    return [{"sender_id": r["sender_id"],
+             "sender_name": r["sender_name"],
+             "msg_count": r["msg_count"]} for r in rows]
 
 
 # ---------- 查询函数 ----------
@@ -501,6 +522,195 @@ def _sync_status():
         }
 
 
+# ---------- Cookie 续期（长任务 + 轮询） ----------
+# 与同步同构：subprocess.Popen 跑 crawl.py --renew-cookie --headless，
+# 后台线程读其输出，并把截图出的二维码（<项目根>/qrcode.png）暴露给前端。
+# stage: idle | waiting_scan | scanning | done | failed
+_renew_state = {
+    "proc": None,
+    "exit_code": None,
+    "output": [],
+    "stage": "idle",
+    "qrcode_mtime": 0,
+}
+_renew_lock = threading.Lock()
+
+
+def _renew_worker(proc):
+    """后台线程：读续期子进程输出，推断 stage（等待扫码/成功/失败）。"""
+    lines = []
+    try:
+        for line in proc.stdout:
+            text = line.rstrip("\n")
+            lines.append(text)
+            if len(lines) > 200:
+                del lines[:-200]
+            stage = "waiting_scan"
+            if "二维码已截图" in text or "请用微博 APP 扫码" in text:
+                stage = "waiting_scan"
+            if "检测到扫码登录" in text or "已登录" in text or "已有有效 cookie" in text:
+                stage = "scanning"
+            with _renew_lock:
+                _renew_state["output"] = list(lines)
+                if _renew_state["stage"] in ("idle", "waiting_scan"):
+                    _renew_state["stage"] = stage
+    finally:
+        code = proc.wait()
+    # 进程退出后根据退出码定 stage
+    if code == 0:
+        final_stage = "done"
+    else:
+        final_stage = "failed"
+    with _renew_lock:
+        _renew_state["exit_code"] = code
+        _renew_state["output"] = lines[-200:]
+        _renew_state["stage"] = final_stage
+        _renew_state["proc"] = None
+
+
+def _start_renew():
+    """尝试启动 cookie 续期（无头截图二维码）。
+
+    返回 (ok, reason)：ok=False 时 reason 为 'running'（已有任务）或
+    'syncing'（同步在跑，需先等同步结束）。
+    """
+    with _renew_lock:
+        if _renew_state["proc"] is not None:
+            return False, "running"
+        # 与同步互斥：同步在跑时不允许启动续期
+        if _sync_state["proc"] is not None:
+            return False, "syncing"
+        # 注意：必须显式传 --headless，否则服务器无桌面环境会尝试弹窗失败
+        proc = subprocess.Popen(
+            [sys.executable, "crawl.py", "--renew-cookie", "--headless"],
+            cwd=_PROJECT_DIR,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        _renew_state["proc"] = proc
+        _renew_state["exit_code"] = None
+        _renew_state["output"] = []
+        _renew_state["stage"] = "idle"
+        _renew_state["qrcode_mtime"] = 0
+    threading.Thread(target=_renew_worker, args=(proc,), daemon=True).start()
+    return True, ""
+
+
+def _renew_status():
+    """返回续期状态；qrcode_url 仅在二维码文件存在时给出（带 mtime 防缓存）。"""
+    with _renew_lock:
+        running = _renew_state["proc"] is not None
+        stage = _renew_state["stage"]
+        exit_code = _renew_state["exit_code"]
+        qrcode_mtime = _renew_state["qrcode_mtime"]
+    qrcode_url = None
+    if os.path.isfile(QRCODE_IMAGE_PATH):
+        try:
+            mtime = os.path.getmtime(QRCODE_IMAGE_PATH)
+        except OSError:
+            mtime = 0
+        # 仅当 mtime 变化时更新（避免前端无谓重绘）
+        if mtime and mtime != qrcode_mtime:
+            with _renew_lock:
+                _renew_state["qrcode_mtime"] = mtime
+            qrcode_url = f"/qr/{QRCODE_FILE_NAME}?t={int(mtime)}"
+    return {
+        "running": running,
+        "stage": stage,
+        "exit_code": exit_code,
+        "output": "\n".join(_renew_state["output"]),
+        "qrcode_url": qrcode_url,
+    }
+
+
+def _stop_renew():
+    """终止续期子进程（SIGINT，与同步同款）。"""
+    with _renew_lock:
+        proc = _renew_state["proc"]
+    if proc is not None:
+        try:
+            os.kill(proc.pid, 2)  # SIGINT
+        except ProcessLookupError:
+            pass
+
+
+# ---------- 导出 token 管理 ----------
+
+# token → {"path": str, "created_at": float}；TTL 5 分钟。
+# 导出 API 写文件后注册 token，前端拿 token 走下载路由取文件，
+# 避免向前端暴露绝对路径，防止目录穿越攻击。
+_EXPORT_TOKENS: dict[str, dict] = {}
+_EXPORT_TOKEN_TTL = 300  # 秒
+_export_tokens_lock = threading.Lock()
+
+
+def _generate_export_token() -> str:
+    """生成 URL 安全的随机 token。"""
+    return secrets.token_urlsafe(16)
+
+
+def _register_export(path: str) -> str:
+    """注册导出文件路径，返回下载用 token。"""
+    token = _generate_export_token()
+    with _export_tokens_lock:
+        _EXPORT_TOKENS[token] = {"path": path, "created_at": time.time()}
+    return token
+
+
+def _resolve_export_token(token: str) -> str | None:
+    """校验 token：存在且未过期则返回文件路径，否则 None。
+
+    顺带清理过期 token，避免字典无限增长。
+    """
+    if not token:
+        return None
+    now = time.time()
+    with _export_tokens_lock:
+        # 清理过期 token
+        expired = [t for t, v in _EXPORT_TOKENS.items()
+                   if now - v["created_at"] > _EXPORT_TOKEN_TTL]
+        for t in expired:
+            _EXPORT_TOKENS.pop(t, None)
+        entry = _EXPORT_TOKENS.get(token)
+        if entry is None:
+            return None
+        if now - entry["created_at"] > _EXPORT_TOKEN_TTL:
+            _EXPORT_TOKENS.pop(token, None)
+            return None
+        return entry["path"]
+
+
+def _preview_export_file(path: str, fmt: str) -> list[dict]:
+    """读取导出文件前 50 条返回预览数据。
+
+    fmt="json"：解析 JSON 数组取前 50 条（每条 {sender_name, text}）。
+    fmt="csv"：用 csv.DictReader 读前 50 行（含 created_at/sender_name/text/is_target）。
+    解析失败返回空列表（不阻塞下载流程）。
+    """
+    PREVIEW_LIMIT = 50
+    try:
+        if fmt == "json":
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                return data[:PREVIEW_LIMIT]
+            return []
+        # csv
+        rows = []
+        with open(path, "r", encoding="utf-8-sig", newline="") as f:
+            reader = csv.DictReader(f)
+            for i, row in enumerate(reader):
+                if i >= PREVIEW_LIMIT:
+                    break
+                # DictReader 返回的值可能是 None，统一转字符串
+                rows.append({k: (v if v is not None else "") for k, v in row.items()})
+        return rows
+    except Exception:
+        return []
+
+
 # ---------- HTTP Handler ----------
 
 class Handler(BaseHTTPRequestHandler):
@@ -550,6 +760,19 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._send_file(full)
 
+    def _serve_qr_static(self, path):
+        """服务续期二维码图片（仅允许项目根下的 qrcode.png，防目录穿越）。"""
+        name = path[len("/qr/"):].replace("\\", "/").lstrip("/")
+        # 仅允许固定文件名，杜绝任意路径访问
+        if name != QRCODE_FILE_NAME:
+            self._send_text("Forbidden", status=403)
+            return
+        full = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), name))
+        if not os.path.isfile(full):
+            self._send_text("Not Found", status=404)
+            return
+        self._send_file(full)
+
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path
@@ -558,16 +781,36 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/":
             self._serve_static("index.html")
             return
+        if path == "/export.html":
+            self._serve_static("export.html")
+            return
         if path.startswith("/web/"):
             self._serve_static(path[len("/web/"):])
             return
         if path.startswith("/media/"):
             self._serve_media_static(path)
             return
+        if path.startswith("/qr/"):
+            self._serve_qr_static(path)
+            return
         if path.startswith("/api/"):
             self._route_api(path, qs)
             return
         self._send_text("Not Found", status=404)
+
+    def _read_json_body(self):
+        """读取请求体并解析 JSON。失败抛 ValueError。"""
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        if length <= 0:
+            return {}
+        raw = self.rfile.read(length)
+        if not raw:
+            return {}
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            raise ValueError(f"请求体 JSON 解析失败: {e}")
+        return data if isinstance(data, dict) else {}
 
     def do_POST(self):
         parsed = urlparse(self.path)
@@ -578,11 +821,190 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._send_json({"error": "sync already running"}, status=409)
             return
+        if path == "/api/renew":
+            ok, reason = _start_renew()
+            if ok:
+                self._send_json({"status": "started"}, status=202)
+            elif reason == "syncing":
+                self._send_json({"error": "同步任务进行中，请等待同步完成后再续期"}, status=409)
+            else:
+                self._send_json({"error": "续期任务已在运行"}, status=409)
+            return
+        if path == "/api/renew/stop":
+            _stop_renew()
+            self._send_json({"status": "stopped"})
+            return
+        if path == "/api/export/member":
+            self._handle_export_member()
+            return
+        if path == "/api/export/daily":
+            self._handle_export_daily()
+            return
         self._send_text("Not Found", status=404)
+
+    def _handle_export_member(self):
+        """POST /api/export/member — 成员发言导出。
+
+        body: {gid, sender_name?, sender_id?, since?, until?, fmt?, compact?}
+        since/until 为 'YYYY-MM-DD'，转 CST 当日 [start, end) 毫秒。
+        """
+        try:
+            body = self._read_json_body()
+        except ValueError as e:
+            self._send_json({"error": str(e)}, status=400)
+            return
+        gid = body.get("gid")
+        if gid is None:
+            self._send_json({"error": "缺少必填参数 gid"}, status=400)
+            return
+        try:
+            gid = int(gid)
+        except (TypeError, ValueError):
+            self._send_json({"error": "gid 必须是整数"}, status=400)
+            return
+
+        sender_name = body.get("sender_name") or None
+        sender_id_raw = body.get("sender_id")
+        sender_id = None
+        if sender_id_raw not in (None, ""):
+            try:
+                sender_id = int(sender_id_raw)
+            except (TypeError, ValueError):
+                self._send_json({"error": "sender_id 必须是整数"}, status=400)
+                return
+        fmt = body.get("fmt") or "json"
+        if fmt not in ("json", "csv"):
+            self._send_json({"error": "fmt 必须是 json 或 csv"}, status=400)
+            return
+        compact = bool(body.get("compact", False))
+
+        since_ms = None
+        until_ms = None
+        since_str = body.get("since")
+        until_str = body.get("until")
+        try:
+            if since_str:
+                since_ms, _ = _cst_day_bounds(since_str)
+            if until_str:
+                # until 取当日全天：[start, 次日零点)
+                _, until_ms = _cst_day_bounds(until_str)
+        except Exception:
+            self._send_json({"error": "日期格式应为 YYYY-MM-DD"}, status=400)
+            return
+
+        # 至少要有 sender_name 或 sender_id 之一，避免误导出全群消息
+        if not sender_name and sender_id is None:
+            self._send_json(
+                {"error": "请至少指定 sender_name 或 sender_id 之一"},
+                status=400)
+            return
+
+        try:
+            from weibo_im.export import export_member_messages
+            result = export_member_messages(
+                db_path=self.db_path,
+                gid=gid,
+                sender_name=sender_name,
+                sender_id=sender_id,
+                since_ms=since_ms,
+                until_ms=until_ms,
+                fmt=fmt,
+                compact=compact,
+            )
+        except Exception as e:
+            self._send_json({"error": f"导出失败: {e}"}, status=500)
+            return
+
+        preview = _preview_export_file(result["path"], fmt)
+        token = _register_export(result["path"])
+        filename = os.path.basename(result["path"])
+        self._send_json({
+            "path": filename,
+            "count": result["count"],
+            "start_cst": result["start_cst"],
+            "end_cst": result["end_cst"],
+            "group_name": result["group_name"],
+            "preview": preview,
+            "preview_total": len(preview),
+            "download_token": token,
+        })
+
+    def _handle_export_daily(self):
+        """POST /api/export/daily — 每日群聊日报导出。
+
+        body: {gid, date_str, sender_name?, sender_id?}
+        """
+        try:
+            body = self._read_json_body()
+        except ValueError as e:
+            self._send_json({"error": str(e)}, status=400)
+            return
+        gid = body.get("gid")
+        if gid is None:
+            self._send_json({"error": "缺少必填参数 gid"}, status=400)
+            return
+        try:
+            gid = int(gid)
+        except (TypeError, ValueError):
+            self._send_json({"error": "gid 必须是整数"}, status=400)
+            return
+        date_str = body.get("date_str")
+        if not date_str:
+            self._send_json({"error": "缺少必填参数 date_str"}, status=400)
+            return
+
+        sender_name = body.get("sender_name") or None
+        sender_id_raw = body.get("sender_id")
+        sender_id = None
+        if sender_id_raw not in (None, ""):
+            try:
+                sender_id = int(sender_id_raw)
+            except (TypeError, ValueError):
+                self._send_json({"error": "sender_id 必须是整数"}, status=400)
+                return
+
+        try:
+            from weibo_im.export import export_daily_report
+            result = export_daily_report(
+                db_path=self.db_path,
+                gid=gid,
+                date_str=date_str,
+                sender_name=sender_name,
+                sender_id=sender_id,
+            )
+        except ValueError as e:
+            self._send_json({"error": str(e)}, status=400)
+            return
+        except Exception as e:
+            self._send_json({"error": f"导出失败: {e}"}, status=500)
+            return
+
+        preview = _preview_export_file(result["path"], "csv")
+        token = _register_export(result["path"])
+        filename = os.path.basename(result["path"])
+        self._send_json({
+            "path": filename,
+            "count": result["count"],
+            "target_count": result["target_count"],
+            "context_count": result["context_count"],
+            "date": result["date"],
+            "group_name": result["group_name"],
+            "target_sender_id": result["target_sender_id"],
+            "target_sender_name": result["target_sender_name"],
+            "preview": preview,
+            "preview_total": len(preview),
+            "download_token": token,
+        })
 
     def _route_api(self, path, qs):
         if path == "/api/sync/status":
             self._send_json(_sync_status())
+            return
+        if path == "/api/renew/status":
+            self._send_json(_renew_status())
+            return
+        if path == "/api/export/download":
+            self._handle_export_download(qs)
             return
         conn = self.conn
         try:
@@ -595,6 +1017,9 @@ class Handler(BaseHTTPRequestHandler):
                     self._send_json(query_month_days(conn, gid, month))
                 else:
                     self._send_json(query_dates(conn, gid))
+            elif path == "/api/members":
+                gid = int(qs.get("gid", ["0"])[0])
+                self._send_json(query_members_list(conn, gid))
             elif path == "/api/messages":
                 gid = int(qs.get("gid", ["0"])[0])
                 sender_name = qs.get("sender_name", [""])[0] or ""
@@ -634,6 +1059,38 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"error": "not found"}, status=404)
         except Exception as e:
             self._send_json({"error": str(e)}, status=500)
+
+    def _handle_export_download(self, qs):
+        """GET /api/export/download?token=xxx — 凭 token 下载导出文件。
+
+        token 由 POST /api/export/* 注册，5 分钟内有效。校验通过后以
+        attachment 方式返回文件，触发浏览器下载。
+        """
+        token = qs.get("token", [""])[0]
+        path = _resolve_export_token(token)
+        if not path or not os.path.isfile(path):
+            self._send_json({"error": "token 无效或已过期"}, status=404)
+            return
+        try:
+            with open(path, "rb") as f:
+                data = f.read()
+        except OSError as e:
+            self._send_json({"error": f"读取文件失败: {e}"}, status=500)
+            return
+        filename = os.path.basename(path)
+        # RFC 5987 编码文件名，支持中文
+        from urllib.parse import quote
+        filename_encoded = quote(filename)
+        ctype = _guess_content_type(path)
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header(
+            "Content-Disposition",
+            f"attachment; filename=\"{filename_encoded}\"; "
+            f"filename*=UTF-8''{filename_encoded}")
+        self.end_headers()
+        self.wfile.write(data)
 
     def _serve_static(self, rel):
         # 防目录穿越

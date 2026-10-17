@@ -9,15 +9,41 @@
 <body>
   <div id="topbar">
     <label class="field-label">群：<select id="group-select" title="选择群"></select></label>
+    <label class="field-label">成员：<select id="member-select" title="按成员过滤"><option value="">全部成员</option></select></label>
     <button id="search-btn" type="button" title="打开发送者 / 关键词搜索">🔍 高级搜索</button>
+    <a href="/export.html" class="nav-link-btn" title="数据导出">📤 数据导出</a>
     <button id="sync-btn" type="button" title="增量同步新消息">🔄 同步</button>
     <label id="auto-refresh-toggle" class="ar-toggle" title="每分钟自动同步一次">
-      <input type="checkbox" id="auto-refresh-check" checked>
+      <input type="checkbox" id="auto-refresh-check">
       <span class="ar-track"><span class="ar-thumb"></span></span>
       <span class="ar-label">自动同步</span>
       <div id="auto-refresh-countdown" class="ar-countdown" aria-hidden="true" title="距下次同步 60s"></div>
     </label>
     <span id="status">加载中…</span>
+  </div>
+
+  <!-- 续期弹窗（Cookie 过期时自动弹出，仅提供一键续期） -->
+  <div id="renew-modal" class="renew-modal" hidden>
+    <div class="rm-backdrop"></div>
+    <div class="rm-dialog" role="dialog" aria-modal="true">
+      <button class="rm-close" type="button" title="关闭" id="renew-modal-close">×</button>
+      <div class="rm-title" id="renew-modal-title">登录已过期</div>
+      <p class="rm-desc" id="renew-modal-desc">Cookie 已失效，无法同步新消息。点击下方按钮即可重新登录。</p>
+
+      <!-- 初始态：一键续期按钮 -->
+      <div id="renew-intro" class="rm-intro">
+        <button id="renew-start-btn" type="button" class="primary-btn rm-start">一键续期并登录</button>
+      </div>
+
+      <!-- 续期中：放大的二维码 + 状态 -->
+      <div id="renew-scan" class="rm-scan" hidden>
+        <div class="rm-qr-wrap">
+          <img id="renew-qr-img" alt="请使用微博 APP 扫码" class="rm-qr-img">
+        </div>
+        <div class="rm-renew-status" id="renew-status">正在生成二维码…</div>
+        <button id="renew-stop-btn" type="button" class="ghost-btn" hidden>取消续期</button>
+      </div>
+    </div>
   </div>
 
   <div id="main">

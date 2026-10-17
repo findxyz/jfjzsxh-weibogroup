@@ -11,15 +11,21 @@
     python crawl.py --set-cookie 'SUB=xxx; SUBP=yyy'   # 首次设置 cookie（手动）
     python crawl.py --probe-boundary                    # 盲测所有群最早边界
     python crawl.py --probe-boundary --gid 4761715839862414  # 只测指定群
-    python crawl.py --renew-cookie                     # 打开浏览器扫码续期 cookie
+    python crawl.py --renew-cookie                     # 打开本机 Chrome 扫码续期 cookie
+    python crawl.py --renew-cookie --no-chrome         # 强制用 Playwright 自带 Chromium 扫码
+    python crawl.py --renew-cookie --chrome-path /path/to/chrome  # 指定 Chrome 路径
     python crawl.py --check-playwright                 # 检查 Playwright 环境就绪
     python crawl.py --stats                            # 打印数据库统计
     python crawl.py --search 关键词                    # 全文搜索消息
+    python crawl.py --diff --old 旧包.json --new 新包.json          # 对比两个导出包，输出新增补充包
+    python crawl.py --diff --old old.csv --new new.csv --diff-format csv -O delta.csv  # 指定格式与输出路径
 
 扫码登录流程（--renew-cookie）：
-    程序用 Playwright 打开微博扫码页，把二维码截图保存到本地文件并尝试用
-    系统默认程序打开图片。你在控制台看到「请扫码」提示后，用微博 APP 扫码，
-    程序检测到登录成功后会把 cookie 写入数据库。
+    程序优先调用本机已安装的 Chrome（Google Chrome）打开微博扫码页；若本机
+    没有 Chrome 则回退到 Playwright 自带的 Chromium。二维码截图保存到本地文件
+    并尝试用系统默认程序打开图片。你在控制台看到「请扫码」提示后，用微博 APP
+    扫码，程序检测到登录成功后会把 cookie 写入数据库。
+    也可用 --no-chrome 强制走自带 Chromium，或 --chrome-path 指定 Chrome 路径。
 """
 from __future__ import annotations
 
@@ -29,6 +35,7 @@ import time
 import argparse
 import logging
 import platform
+import shutil
 import subprocess
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -75,30 +82,118 @@ def _open_image_cross_platform(path: str):
         pass
 
 
-def _check_playwright(log: logging.Logger) -> bool:
-    """检查 Playwright + Chromium 环境是否就绪。打印诊断信息，返回是否通过。"""
-    ok = True
+def _find_chrome_executable() -> str | None:
+    """跨平台探测本机已安装的 Google Chrome 可执行文件路径。
 
+    返回首个存在的路径；找不到返回 None（不影响回退到 Playwright 自带 Chromium）。
+    """
+    candidates: list[str] = []
+    if sys.platform == "darwin":
+        candidates = [
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            os.path.expanduser("~/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+        ]
+    elif sys.platform.startswith("win"):
+        candidates = [
+            os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        ]
+    else:
+        candidates = [
+            "/usr/bin/google-chrome",
+            "/usr/bin/google-chrome-stable",
+            "/opt/google/chrome/chrome",
+            "/snap/bin/chromium",
+        ]
+    # PATH 兜底
+    which = shutil.which("google-chrome") or shutil.which("google-chrome-stable")
+    if which:
+        candidates.append(which)
+    for path in candidates:
+        if path and os.path.isfile(path):
+            return path
+    return None
+
+
+def _launch_browser(pw, *, headless: bool, chrome_path: str, no_chrome: bool, log: logging.Logger):
+    """启动浏览器用于扫码续期，优先调用本机 Chrome。
+
+    优先级：
+      1. ``--chrome-path`` 显式指定的本机 Chrome 可执行文件
+      2. 本机已安装的 Chrome（Playwright ``channel="chrome"``）
+      3. Playwright 自带 Chromium（``--no-chrome`` 或前两者均不可用时回退）
+
+    Returns:
+        playwright 的 Browser 实例
+    """
+    launch_args = ["--disable-blink-features=AutomationControlled"]
+    if headless:
+        launch_args += ["--no-sandbox", "--disable-setuid-sandbox"]
+
+    # 1) 显式路径
+    if chrome_path:
+        chrome_path = os.path.expanduser(chrome_path)
+        if not os.path.isfile(chrome_path):
+            log.warning("指定的 --chrome-path 不存在: %s，回退其它方式", chrome_path)
+        else:
+            log.info("使用本机 Chrome（--chrome-path）: %s", chrome_path)
+            return pw.chromium.launch(executable_path=chrome_path, headless=headless, args=launch_args)
+
+    # 2) 本机已安装 Chrome
+    if not no_chrome:
+        try:
+            log.info("尝试调用本机已安装的 Chrome（channel=chrome）...")
+            return pw.chromium.launch(channel="chrome", headless=headless, args=launch_args)
+        except Exception as e:
+            log.warning("未找到本机 Chrome（%s），回退 Playwright 自带 Chromium", str(e).split("\n")[0])
+
+    # 3) 自带 Chromium
+    log.info("使用 Playwright 自带 Chromium")
+    return pw.chromium.launch(headless=headless, args=launch_args)
+
+
+def _check_playwright(log: logging.Logger) -> bool:
+    """检查 Playwright 环境是否就绪（浏览器能启动即可）。
+
+    优先检测本机已安装的 Chrome，其次回退到 Playwright 自带 Chromium。
+    打印诊断信息，返回是否通过。
+    """
     # 第一层：Python 包
     try:
         from playwright.sync_api import sync_playwright  # noqa: F811
         log.info("✅ playwright Python 包可导入")
     except ImportError:
         log.error("❌ playwright Python 包未安装（当前解释器: %s）", sys.executable)
-        log.error("   → uv add playwright && uv run playwright install chromium")
+        log.error("   → uv add playwright && uv run playwright install")
         return False
 
-    # 第二层：浏览器能启动
-    try:
-        with sync_playwright() as pw:
-            browser = pw.chromium.launch(headless=True, args=["--no-sandbox"])
-            browser.close()
-        log.info("✅ Chromium 启动正常")
-    except Exception as e:
-        log.error("❌ Chromium 启动失败: %s", str(e).split("\n")[0])
-        ok = False
+    chrome_path = _find_chrome_executable()
+    if chrome_path:
+        log.info("✅ 检测到本机 Chrome: %s", chrome_path)
 
-    return ok
+    # 第二层：浏览器能启动（本机 Chrome 优先，Chromium 兜底）
+    with sync_playwright() as pw:
+        try:
+            if chrome_path:
+                b = pw.chromium.launch(executable_path=chrome_path, headless=True, args=["--no-sandbox"])
+            else:
+                b = pw.chromium.launch(channel="chrome", headless=True, args=["--no-sandbox"])
+            b.close()
+            log.info("✅ 本机 Chrome 启动正常")
+            return True
+        except Exception as e:
+            log.info("本机 Chrome 不可用（%s），尝试自带 Chromium", str(e).split("\n")[0])
+
+        try:
+            b = pw.chromium.launch(headless=True, args=["--no-sandbox"])
+            b.close()
+            log.info("✅ Playwright 自带 Chromium 启动正常")
+            return True
+        except Exception as e:
+            log.error("❌ Chromium 启动失败: %s", str(e).split("\n")[0])
+            log.error("   → uv run playwright install chromium")
+            return False
 
 
 def _is_logged_in(page) -> bool:
@@ -116,12 +211,17 @@ def _is_logged_in(page) -> bool:
     return "#/chat" in href
 
 
-def _renew_cookie(db_path: str, log: logging.Logger, headless: bool):
+def _renew_cookie(db_path: str, log: logging.Logger, headless: bool, chrome_path: str = "", no_chrome: bool = False):
     """用 Playwright 打开 api.weibo.com/chat → 截图二维码 → 等你扫码 → 存 cookie
+
+    浏览器默认优先调用本机已安装的 Chrome（更顺手、可复用你 Chrome 里的登录态），
+    找不到时回退到 Playwright 自带 Chromium。
 
     Args:
         headless: True=无头模式（截图保存文件，靠文件查看二维码）；
                   False=有头模式（直接弹出浏览器窗口扫码，体验更直观）。
+        chrome_path: 显式指定本机 Chrome 可执行文件路径（为空则自动探测）。
+        no_chrome: True 时强制使用 Playwright 自带 Chromium，不调用本机 Chrome。
     """
     if not _check_playwright(log):
         log.error("请先解决以上问题后重试: uv run python crawl.py --renew-cookie")
@@ -130,12 +230,7 @@ def _renew_cookie(db_path: str, log: logging.Logger, headless: bool):
     from playwright.sync_api import sync_playwright  # noqa: F811
 
     with sync_playwright() as pw:
-        # Windows / macOS 上推荐有头模式，扫码更方便；Linux 无桌面用无头 + 截图
-        launch_args = ["--disable-blink-features=AutomationControlled"]
-        if headless:
-            launch_args.append("--no-sandbox")
-            launch_args.append("--disable-setuid-sandbox")
-        browser = pw.chromium.launch(headless=headless, args=launch_args)
+        browser = _launch_browser(pw, headless=headless, chrome_path=chrome_path, no_chrome=no_chrome, log=log)
         try:
             ctx = browser.new_context(
                 user_agent=(
@@ -264,6 +359,151 @@ def _do_search(db_path: str, keyword: str, limit: int):
     _print_search_results(rows, keyword, limit)
 
 
+def _do_list_members(db_path: str, gid: int, log: logging.Logger):
+    """列出指定群内发过言的成员（sender_id / 昵称 / 发言数 / 最近发言时间）。"""
+    if not gid:
+        log.error("--list-members 需要配合 --gid 指定群")
+        return
+    from weibo_im.export import list_members
+    members = list_members(db_path, gid)
+    if members:
+        from weibo_im.export import ms_to_cst
+        for m in members:
+            ts = m.get("last_msg_at") or 0
+            last = ms_to_cst(ts) or "(无)"
+            log.info("  sender_id=%-12d 发言=%-5d 最近=%s  %s",
+                     m["sender_id"], m["msg_count"], last, m["sender_name"] or "(未知)")
+
+
+def _do_export(db_path: str, gid: int, sender_name: str, sender_id: int,
+               since: str, until: str, output: str, compact: bool, fmt: str, log: logging.Logger,
+               since_mid: str = "", with_meta: bool = False, slim: bool = False,
+               watermark_file: str = ""):
+    """导出指定群内某成员本人发言为文件（JSON 或 CSV，用于 AI 分析）。
+
+    参数校验后委托 weibo_im.export 模块完成 DB 查询、数据组装、文件写入。
+
+    增量导出（水位线）：
+      - since_mid：只导出 mid 大于此值的消息（知识库未收录的新消息）。
+      - watermark_file：未给 since_mid 时从此文件读取 max_mid 自动续跑。
+      - with_meta：输出带 mid + created_at 列，便于本地核验（不建议上传知识库，mid 浪费 token）。
+      - slim：输出 created_at,text 两列，上传知识库推荐用此格式（体积小、保留时间线）。
+    """
+    if not gid:
+        log.error("--export 需要配合 --gid 指定群")
+        return
+    if not sender_name and not sender_id:
+        log.error("--export 需要指定成员：--sender-name 或 --sender-id 至少给一个")
+        log.error("提示：用 --list-members --gid GID 查看群内成员昵称/ID")
+        return
+
+    from weibo_im.export import export_member_messages
+    since_ms = _parse_since(since) if since else None
+    until_ms = _parse_since(until) if until else None
+
+    result = export_member_messages(
+        db_path=db_path, gid=gid,
+        sender_name=sender_name or None,
+        sender_id=sender_id or None,
+        since_ms=since_ms, until_ms=until_ms,
+        output_path=output or None,
+        compact=compact,
+        fmt=fmt,
+        since_mid=since_mid or None,
+        with_meta=with_meta,
+        slim=slim,
+        watermark_file=watermark_file or None,
+    )
+
+    count = result["count"]
+    output_path = result["path"]
+    log.info("已导出 %d 条发言 → %s", count, output_path)
+    if count:
+        log.info("时间范围: %s ~ %s (CST)", result["start_cst"], result["end_cst"])
+        if result.get("max_mid"):
+            log.info("本批最大 mid: %s（上传成功后用此值推进水位线）", result["max_mid"])
+    else:
+        log.warning("未找到匹配的发言，请用 --list-members 核对成员标识与 --gid")
+
+
+def _do_daily_export(db_path: str, gid: int, date_str: str,
+                     sender_name: str, sender_id: int,
+                     output: str, log: logging.Logger):
+    """导出每日群聊日报 CSV（含当日群全部消息作为上下文，用于 AI 生成成员日报）。
+
+    参数校验后委托 weibo_im.export.export_daily_report 完成。
+    """
+    if not gid:
+        log.error("--daily 需要配合 --gid 指定群")
+        return
+    if not date_str:
+        log.error("--daily 需要配合 --date 指定日期（格式 YYYY-MM-DD）")
+        return
+    if not sender_name and not sender_id:
+        log.error("--daily 需要指定成员：--sender-name 或 --sender-id 至少给一个")
+        log.error("提示：用 --list-members --gid GID 查看群内成员昵称/ID")
+        return
+
+    from weibo_im.export import export_daily_report
+    try:
+        result = export_daily_report(
+            db_path=db_path, gid=gid, date_str=date_str,
+            sender_name=sender_name or None,
+            sender_id=sender_id or None,
+            output_path=output or None,
+        )
+    except ValueError as e:
+        log.error("日期解析失败: %s", e)
+        return
+
+    count = result["count"]
+    log.info("已导出日报 %d 条消息 → %s", count, result["path"])
+    log.info("群聊: %s", result["group_name"] or "(未知群)")
+    log.info("日期: %s", result["date"])
+    target_name = result["target_sender_name"] or "(未知)"
+    target_sid = result["target_sender_id"]
+    log.info("目标成员: %s (sender_id=%s)", target_name, target_sid if target_sid else "无")
+    log.info("  本人发言: %d 条", result["target_count"])
+    log.info("  上下文消息: %d 条", result["context_count"])
+    if result["target_count"] == 0:
+        log.warning("目标成员当日无发言，CSV 中 is_target 全为 0")
+
+
+def _do_diff(old_path: str, new_path: str, output: str, fmt: str, log: logging.Logger):
+    """对比两个导出数据包，输出新增消息的补充包（用于增量更新 NotebookLM 等）。
+
+    委托 weibo_im.export.diff_export_files 完成文件解析（JSON/CSV 自适应）、
+    组合键差集（sender_name+text+出现序号）、补充包写出。
+    """
+    if not old_path:
+        log.error("--diff 需要配合 --old 指定旧数据包路径")
+        return
+    if not new_path:
+        log.error("--diff 需要配合 --new 指定新数据包路径")
+        return
+    from weibo_im.export import diff_export_files
+    try:
+        result = diff_export_files(
+            old_path=old_path,
+            new_path=new_path,
+            output_path=output or None,
+            fmt=fmt,
+        )
+    except FileNotFoundError as e:
+        log.error("文件不存在: %s", e)
+        return
+    except (ValueError, OSError) as e:
+        log.error("文件解析失败: %s", e)
+        return
+    log.info("对比完成：旧=%d 新=%d 新增=%d 重复=%d → %s",
+             result["old_count"], result["new_count"],
+             result["delta_count"], result["dup_count"], result["path"])
+    if not result["same_sender"]:
+        log.warning("两包前 10 条发言者不一致，请确认是同一群同一成员")
+    if result["delta_count"] == 0:
+        log.info("无新增消息")
+
+
 def main():
     parser = argparse.ArgumentParser(description="微博群聊消息抓取（本地版）")
     parser.add_argument("--db", default="", help="数据库路径（默认 <项目>/weibo_im.db）")
@@ -278,6 +518,10 @@ def main():
                         help="检查 Playwright + Chromium 环境是否就绪（部署前验证）")
     parser.add_argument("--headless", action="store_true",
                         help="--renew-cookie 时使用无头模式（仅截图，不弹窗；默认有头弹窗）")
+    parser.add_argument("--chrome-path", default="",
+                        help="--renew-cookie 时指定本机 Chrome 可执行文件路径（默认自动探测）")
+    parser.add_argument("--no-chrome", action="store_true",
+                        help="--renew-cookie 时强制使用 Playwright 自带 Chromium（不调用本机 Chrome）")
     parser.add_argument("--verbose", action="store_true", help="详细日志")
     parser.add_argument("--probe-boundary", action="store_true",
                         help="盲测群聊最早可爬取边界（入群时间）")
@@ -297,6 +541,44 @@ def main():
                         help="全文搜索消息（FTS5 关键词）")
     parser.add_argument("--search-limit", type=int, default=50,
                         help="--search 的最大返回条数（默认 50）")
+    parser.add_argument("--list-members", action="store_true",
+                        help="列出指定群内发过言的成员（需配合 --gid）")
+    parser.add_argument("--export", action="store_true",
+                        help="导出指定群某成员的发言为 JSON（用于 AI 分析）；需配合 --gid 与成员标识")
+    parser.add_argument("--sender-name", default="",
+                        help="--export 时按发送者昵称筛选")
+    parser.add_argument("--sender-id", type=int, default=0,
+                        help="--export 时按发送者 ID 筛选（比昵称更稳定）")
+    parser.add_argument("--until", default="",
+                        help="--export 的结束时间（日期如 2026-07-14 或毫秒时间戳，CST 口径，开区间）")
+    parser.add_argument("--output", "-o", default="",
+                        help="--export 的输出文件路径（默认 项目目录/export_<gid>_<sender>.json）")
+    parser.add_argument("--compact", action="store_true",
+                        help="--export 时输出紧凑（minified）JSON，去掉缩进与多余空白，减小文件体积")
+    parser.add_argument("--format", choices=["json", "csv"], default="json",
+                        help="--export 的输出格式：json（默认，纯数组）或 csv（表头 sender_name,text）")
+    parser.add_argument("--daily", action="store_true",
+                        help="导出每日群聊日报 CSV（含当日群全部消息作为上下文）；需配合 --gid --date --sender-name/--sender-id")
+    parser.add_argument("--date", default="",
+                        help="--daily 的日期，格式 YYYY-MM-DD 或 YYYY/MM/DD（CST 当日）")
+    parser.add_argument("--diff", action="store_true",
+                        help="对比两个导出数据包，输出新增消息的补充包；需配合 --old / --new")
+    parser.add_argument("--old", default="",
+                        help="--diff 的旧数据包路径（上次导出）")
+    parser.add_argument("--new", default="",
+                        help="--diff 的新数据包路径（本次导出）")
+    parser.add_argument("--diff-format", choices=["json", "csv"], default="json",
+                        help="--diff 补充包输出格式（默认 json，与 --export 一致）")
+    parser.add_argument("--diff-output", "-O", default="",
+                        help="--diff 补充包输出路径（默认 系统临时目录/delta_<时间戳>.<ext>）")
+    parser.add_argument("--since-mid", default="",
+                        help="--export 时只导出 mid 大于此值的消息（增量导出，配合水位线使用）")
+    parser.add_argument("--with-meta", action="store_true",
+                        help="--export 时输出带 mid 与 created_at 列（本地核验用，不建议上传知识库）")
+    parser.add_argument("--slim", action="store_true",
+                        help="--export 时输出 created_at,text 两列（上传知识库推荐：体积小、保留时间线、去冗余）")
+    parser.add_argument("--watermark-file", default="",
+                        help="--export 时从此文件读取 max_mid 作为 --since-mid（文件不存在则全量导出）")
     args = parser.parse_args()
 
     level = logging.DEBUG if args.verbose else logging.INFO
@@ -314,7 +596,8 @@ def main():
 
     # --renew-cookie: 打开浏览器扫码续期
     if args.renew_cookie:
-        _renew_cookie(db_path, log, headless=args.headless)
+        _renew_cookie(db_path, log, headless=args.headless,
+                      chrome_path=args.chrome_path, no_chrome=args.no_chrome)
         return
 
     # --check-playwright: 验证 Playwright + Chromium 环境
@@ -389,6 +672,26 @@ def main():
 
     if args.search:
         _do_search(db_path, args.search, args.search_limit)
+        return
+
+    if args.list_members:
+        _do_list_members(db_path, args.gid, log)
+        return
+
+    if args.export:
+        _do_export(db_path, args.gid, args.sender_name, args.sender_id,
+                   args.since, args.until, args.output, args.compact, args.format, log,
+                   since_mid=args.since_mid, with_meta=args.with_meta,
+                   slim=args.slim, watermark_file=args.watermark_file)
+        return
+
+    if args.daily:
+        _do_daily_export(db_path, args.gid, args.date,
+                         args.sender_name, args.sender_id, args.output, log)
+        return
+
+    if args.diff:
+        _do_diff(args.old, args.new, args.diff_output, args.diff_format, log)
         return
 
     try:

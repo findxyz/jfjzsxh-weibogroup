@@ -1,0 +1,353 @@
+/* 数据导出页面样式 — 复用现有配色体系，与消息查看器一致 */
+
+#topbar {
+  /* 继承 style.css 的 #topbar；仅微调 */
+}
+#topbar .nav-link {
+  margin-left: auto;
+  padding: 4px 12px;
+  font-size: 13px;
+  color: #1a73e8;
+  text-decoration: none;
+  border: 1px solid #1a73e8;
+  border-radius: 4px;
+  background: #fff;
+}
+#topbar .nav-link:hover {
+  background: #e8f0fe;
+}
+#status {
+  margin-left: 8px;
+  color: #888;
+  font-size: 13px;
+}
+
+#export-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px;
+  background: #f5f5f5;
+}
+
+/* Tab 栏 */
+.tabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid #ddd;
+  margin-bottom: 16px;
+  background: #fafafa;
+  border-radius: 6px 6px 0 0;
+  overflow: hidden;
+}
+.tab {
+  padding: 10px 20px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 500;
+  color: #555;
+  border-bottom: 2px solid transparent;
+  transition: background .15s, color .15s, border-color .15s;
+}
+.tab:hover {
+  background: #f0f0f0;
+  color: #333;
+}
+.tab.active {
+  color: #1a73e8;
+  border-bottom-color: #1a73e8;
+  background: #fff;
+}
+
+/* Tab 面板 */
+.tab-panel {
+  display: none;
+}
+.tab-panel.active {
+  display: block;
+}
+
+/* 表单卡片 */
+.form-card {
+  background: #fff;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  padding: 16px 20px;
+  margin-bottom: 16px;
+}
+.form-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  font-size: 13px;
+  color: #555;
+}
+.form-row:last-child {
+  margin-bottom: 0;
+}
+.form-row-inline {
+  flex-wrap: wrap;
+}
+.form-label {
+  display: inline-block;
+  width: 80px;
+  flex-shrink: 0;
+  font-weight: 500;
+  color: #333;
+}
+.form-card select,
+.form-card input[type="date"] {
+  padding: 5px 8px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  font-size: 13px;
+  -webkit-appearance: none;
+  appearance: none;
+  background: #fff;
+}
+.form-card select {
+  min-width: 200px;
+  max-width: 320px;
+}
+.form-hint {
+  color: #999;
+  font-size: 12px;
+}
+.date-sep {
+  color: #999;
+}
+
+.radio-label,
+.checkbox-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  user-select: none;
+}
+.radio-label input,
+.checkbox-label input {
+  margin: 0;
+  cursor: pointer;
+}
+
+/* 主按钮 */
+.primary-btn {
+  padding: 6px 18px;
+  background: #1a73e8;
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background .15s;
+}
+.primary-btn:hover {
+  background: #1557b0;
+}
+.primary-btn:disabled {
+  background: #adb5bd;
+  cursor: not-allowed;
+}
+
+/* 结果区 */
+#result-area {
+  background: #fff;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  padding: 16px 20px;
+  margin-bottom: 16px;
+  animation: fadein .3s ease-out;
+}
+@keyframes fadein {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.result-meta {
+  font-size: 13px;
+  color: #333;
+  margin-bottom: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+.result-meta .meta-item {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+}
+.result-meta .meta-label {
+  color: #888;
+}
+.result-meta .meta-value {
+  font-weight: 500;
+  color: #333;
+}
+.result-meta .meta-highlight {
+  background: #fff3a0;
+  padding: 0 4px;
+  border-radius: 2px;
+  font-weight: 500;
+}
+
+.result-actions {
+  margin-bottom: 16px;
+}
+
+/* 预览表格 */
+.preview-wrap {
+  margin-top: 8px;
+}
+.preview-title {
+  font-size: 13px;
+  color: #555;
+  font-weight: 500;
+  margin-bottom: 8px;
+}
+.preview-table-wrap {
+  overflow-x: auto;
+  max-height: 400px;
+  overflow-y: auto;
+  border: 1px solid #eee;
+  border-radius: 4px;
+}
+#preview-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+#preview-table th {
+  position: sticky;
+  top: 0;
+  background: #f5f5f5;
+  border-bottom: 1px solid #ddd;
+  padding: 6px 10px;
+  text-align: left;
+  font-weight: 600;
+  color: #555;
+  white-space: nowrap;
+}
+#preview-table td {
+  padding: 6px 10px;
+  border-bottom: 1px solid #f0f0f0;
+  color: #333;
+  vertical-align: top;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+#preview-table tr.is-target {
+  background: #fffbea;
+}
+#preview-table tr.is-target td {
+  border-bottom-color: #fff3a0;
+}
+#preview-table .col-is-target {
+  text-align: center;
+  font-weight: 600;
+  color: #d97706;
+  width: 60px;
+}
+#preview-table .col-created_at {
+  white-space: nowrap;
+  color: #888;
+  width: 160px;
+}
+#preview-table .col-sender_name {
+  font-weight: 500;
+  white-space: nowrap;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#preview-table .col-text {
+  min-width: 200px;
+}
+
+/* 错误提示 */
+.result-error {
+  background: #fff5f5;
+  border: 1px solid #f5c2c7;
+  color: #dc3545;
+  padding: 10px 14px;
+  border-radius: 4px;
+  font-size: 13px;
+  margin-bottom: 16px;
+}
+
+/* 空结果提示 */
+.result-empty {
+  text-align: center;
+  color: #888;
+  padding: 40px;
+  font-size: 13px;
+}
+
+/* ── 增量对比 ─────────────────────────────────── */
+
+.diff-files-row {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+.diff-file-slot {
+  flex: 1;
+  border: 1px dashed #ccc;
+  border-radius: 6px;
+  padding: 14px 16px;
+  background: #fafbfc;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  transition: border-color .15s, background .15s;
+}
+.diff-file-slot:hover {
+  border-color: #1a73e8;
+  background: #f6faff;
+}
+.diff-file-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: #333;
+}
+.diff-file-pick {
+  display: inline-block;
+  cursor: pointer;
+}
+.diff-file-btn {
+  display: inline-block;
+  padding: 5px 14px;
+  background: #fff;
+  border: 1px solid #1a73e8;
+  color: #1a73e8;
+  border-radius: 4px;
+  font-size: 13px;
+  transition: background .15s, color .15s;
+}
+.diff-file-pick:hover .diff-file-btn {
+  background: #1a73e8;
+  color: #fff;
+}
+.diff-file-name {
+  font-size: 13px;
+  color: #555;
+  word-break: break-all;
+}
+.diff-file-name.loaded {
+  color: #1a73e8;
+  font-weight: 500;
+}
+.diff-file-meta {
+  font-size: 12px;
+  color: #888;
+}
+.diff-file-meta.error {
+  color: #dc3545;
+}
+

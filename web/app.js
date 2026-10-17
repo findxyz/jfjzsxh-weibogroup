@@ -14,6 +14,7 @@ const state = {
   loadingOlder: false,
   loadingNewer: false,
   reqId: 0,
+  memberName: "",       // 成员过滤：空 = 全部
 };
 
 const LIMIT = 100;
@@ -21,6 +22,7 @@ const LIMIT = 100;
 // ---------- DOM ----------
 const $ = (id) => document.getElementById(id);
 const elGroup = $("group-select");
+const elMember = $("member-select");
 const elSearchBtn = $("search-btn");
 const elSyncBtn = $("sync-btn");
 const elStatus = $("status");
@@ -42,6 +44,23 @@ async function api(path) {
   const resp = await fetch(path);
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
   return resp.json();
+}
+
+// 返回成员过滤的 query string 片段（含前导 &），无过滤时返回 ""
+function memberFilterQ() {
+  return state.memberName ? `&sender_name=${encodeURIComponent(state.memberName)}` : "";
+}
+
+async function loadMembers(gid) {
+  try {
+    const members = await api(`/api/members?gid=${gid}`);
+    elMember.innerHTML = '<option value="">全部成员</option>'
+      + members.map(m => `<option value="${escapeHtml(m.sender_name)}">${escapeHtml(m.sender_name)} (${m.msg_count})</option>`).join("");
+    // 保持当前选中（若仍在该群）
+    if (state.memberName) elMember.value = state.memberName;
+  } catch (e) {
+    elMember.innerHTML = '<option value="">全部成员</option>';
+  }
 }
 
 // ---------- 工具 ----------
@@ -266,7 +285,7 @@ async function loadMonthDays(month) {
 async function loadByDate(gid, date) {
   const myReq = ++state.reqId;
   elStatus.textContent = "加载中…";
-  let params = `gid=${gid}&date=${encodeURIComponent(date)}&limit=${LIMIT}`;
+  let params = `gid=${gid}&date=${encodeURIComponent(date)}&limit=${LIMIT}${memberFilterQ()}`;
   const data = await api(`/api/messages/by_date?${params}`);
   if (myReq !== state.reqId) return; // 已被新请求覆盖
   state.messages = data.messages;
@@ -290,6 +309,7 @@ async function selectGroup(gid) {
   state.gid = gid;
   elStatus.textContent = "加载中…";
   await loadDates(gid);
+  loadMembers(gid);  // 异步加载，不阻塞
   // 默认展开最近月 + 加载每日 + 选最新日期
   if (state.dates.length) {
     const latest = state.dates[0];
@@ -342,8 +362,10 @@ function snippetToHtml(snippet) {
 
 async function doSearch() {
   if (!state.gid) { elSearchStatus.textContent = "请先选择群"; return; }
-  const sender = elSearchSender.value.trim();
+  let sender = elSearchSender.value.trim();
   const keyword = elSearchKeyword.value.trim();
+  // 若成员过滤器已选中但搜索面板发送者为空，自动带入
+  if (!sender && state.memberName) sender = state.memberName;
   if (!sender && !keyword) {
     elSearchStatus.textContent = "请至少填写发送者名称或关键词一项";
     return;
@@ -410,7 +432,7 @@ async function loadOlder() {
   state.loadingOlder = true;
   showLoadingMarker("top");
   const myReq = state.reqId;
-  let params = `gid=${state.gid}&before_ts=${state.before.ts}&limit=${LIMIT}`;
+  let params = `gid=${state.gid}&before_ts=${state.before.ts}&limit=${LIMIT}${memberFilterQ()}`;
   try {
     const data = await api(`/api/messages?${params}`);
     if (myReq !== state.reqId) return;
@@ -461,7 +483,7 @@ async function loadNewer() {
   state.loadingNewer = true;
   showLoadingMarker("bottom");
   const myReq = state.reqId;
-  let params = `gid=${state.gid}&after_ts=${state.after.ts}&limit=${LIMIT}`;
+  let params = `gid=${state.gid}&after_ts=${state.after.ts}&limit=${LIMIT}${memberFilterQ()}`;
   try {
     const data = await api(`/api/messages?${params}`);
     if (myReq !== state.reqId) return;
@@ -608,6 +630,11 @@ document.addEventListener("keydown", (e) => {
 
 elGroup.onchange = () => selectGroup(parseInt(elGroup.value, 10));
 
+elMember.onchange = () => {
+  state.memberName = elMember.value;
+  if (state.selectedDate) loadByDate(state.gid, state.selectedDate);
+};
+
 elDatePicker.onchange = () => {
   if (elDatePicker.value) selectDate(elDatePicker.value);
 };
@@ -629,11 +656,12 @@ document.addEventListener("keydown", (e) => {
 
 // ---------- 同步 ----------
 let syncPollTimer = null;
-// 同步进行中标志：避免手动 + 自动并发触发
+// 同步 / 续期 进行中标志：二者互斥，避免并发触发长任务
 let syncInProgress = false;
+let renewInProgress = false;
 
 async function runSync() {
-  if (syncInProgress) return;
+  if (syncInProgress || renewInProgress) return;
   syncInProgress = true;
   elSyncBtn.disabled = true;
   elSyncBtn.textContent = "同步中...";
@@ -666,15 +694,173 @@ async function pollSync() {
       elSyncBtn.disabled = false;
       elSyncBtn.textContent = "🔄 同步";
       if (data.exit_code === 0) {
+        // 同步成功：确保续期弹窗已关闭
+        if (!elRenewModal.hidden) closeRenewModal();
         await silentRefresh();  // 静默局部更新，不再 location.reload()
       } else {
-        elStatus.textContent = "同步失败（exit " + data.exit_code + "），请查看日志";
+        // 同步失败：解析日志，渲染横幅 + 引导
+        showSyncError(data.output || "", data.exit_code);
       }
     }
   } catch (e) {
     // 网络错误，继续轮询
   }
 }
+
+// ---------- 同步失败提示 + Cookie 一键续期弹窗 ----------
+// Cookie 过期时直接弹出简洁模态，只提供「一键续期」；其余失败类型忽略（保持状态栏文字）。
+function classifySyncError(output) {
+  const text = (output || "").toLowerCase();
+  if (text.includes("cookie 已过期") || text.includes("cookieexpirederror") || text.includes("cookie 未设置")) {
+    return "cookie";
+  }
+  return "other";
+}
+
+// 续期弹窗 DOM
+const elRenewModal = $("renew-modal");
+const elRenewModalClose = $("renew-modal-close");
+const elRenewIntro = $("renew-intro");
+const elRenewScan = $("renew-scan");
+const elRenewStart = $("renew-start-btn");
+const elRenewStop = $("renew-stop-btn");
+const elRenewStatus = $("renew-status");
+const elRenewQrImg = $("renew-qr-img");
+
+function showRenewModal() {
+  elRenewModal.hidden = false;
+  // 回到初始态
+  elRenewIntro.hidden = false;
+  elRenewScan.hidden = true;
+  elRenewQrImg.removeAttribute("src");
+}
+
+function closeRenewModal() {
+  elRenewModal.hidden = true;
+  // 若续期仍在跑，先停止，避免残留进程
+  if (renewInProgress) stopRenew();
+}
+
+elRenewModalClose.addEventListener("click", () => closeRenewModal());
+// 点背景不关闭（避免误关丢失扫码进度）；仅右上角 × 可关
+
+function showSyncError(output, exitCode) {
+  // 仅 cookie 类弹出续期模态；其他失败保持原有状态栏小字提示
+  if (classifySyncError(output) === "cookie") {
+    showRenewModal();
+  }
+}
+
+// ---------- Cookie 一键续期（长任务 + 轮询） ----------
+let renewPollTimer = null;
+
+async function startRenew() {
+  if (renewInProgress) return;
+  if (syncInProgress) {
+    alert("同步任务正在进行，请等待同步完成后再续期。");
+    return;
+  }
+  renewInProgress = true;
+  elSyncBtn.disabled = true;  // 续期期间禁用同步
+  // 切到扫码态：放大二维码 + 状态
+  elRenewIntro.hidden = true;
+  elRenewScan.hidden = false;
+  elRenewStop.hidden = false;
+  setRenewStatus("正在生成登录二维码…", "info");
+  try {
+    const resp = await fetch("/api/renew", { method: "POST" });
+    if (resp.status === 409) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.error || "续期已在运行");
+    }
+    if (!resp.ok) throw new Error("续期启动失败");
+  } catch (e) {
+    renewInProgress = false;
+    elSyncBtn.disabled = false;
+    elRenewStop.hidden = true;
+    elRenewIntro.hidden = false;
+    elRenewScan.hidden = true;
+    setRenewStatus("续期启动失败：" + e.message, "err");
+    return;
+  }
+  renewPollTimer = setInterval(pollRenew, 2000);
+  pollRenew();
+}
+
+async function pollRenew() {
+  try {
+    const data = await (await fetch("/api/renew/status")).json();
+    // 二维码：仅在 url 存在时更新（后端已带 mtime 防缓存）
+    if (data.qrcode_url) {
+      elRenewQrImg.src = data.qrcode_url;
+      elRenewQrImg.alt = "请使用微博 APP 扫码";
+    }
+    const stage = data.stage;
+    if (stage === "waiting_scan") {
+      setRenewStatus("请用微博 APP 扫码登录（扫一扫 → 确认登录）。", "info");
+    } else if (stage === "scanning" || stage === "done") {
+      // 扫码成功后立刻收起二维码，显示「正在处理」
+      elRenewQrImg.removeAttribute("src");
+      elRenewScan.querySelector(".rm-qr-wrap").style.display = "none";
+      if (stage === "scanning") {
+        setRenewStatus("已扫码，正在保存登录状态…", "info");
+      }
+    }
+    if (stage === "done") {
+      clearInterval(renewPollTimer);
+      renewPollTimer = null;
+      renewInProgress = false;
+      elSyncBtn.disabled = false;
+      setRenewStatus("✅ 续期成功！", "ok");
+      // 静默刷新群列表，然后关闭整个弹窗
+      await silentRefresh().catch(() => {});
+      setTimeout(() => closeRenewModal(), 800);
+    } else if (stage === "failed" || (data.running === false && data.exit_code !== 0)) {
+      clearInterval(renewPollTimer);
+      renewPollTimer = null;
+      renewInProgress = false;
+      elSyncBtn.disabled = false;
+      elRenewStop.hidden = true;
+      elRenewScan.querySelector(".rm-qr-wrap").style.display = "";
+      const log = data.output || "";
+      if (log.includes("playwright") || log.includes("未安装") || log.includes("先解决以上问题")) {
+        setRenewStatus("续期失败：Playwright 未安装。请在服务器执行 uv run playwright install chromium 后重试。", "err");
+      } else if (log.includes("超时") || log.includes("timeout")) {
+        setRenewStatus("续期失败：120 秒内未扫码。请重试并尽快扫码。", "err");
+      } else {
+        setRenewStatus("续期失败（exit " + data.exit_code + "）。可关闭后重新点击一键续期。", "err");
+      }
+      // 失败：回到初始态，允许重试
+      elRenewIntro.hidden = false;
+      elRenewScan.hidden = true;
+    }
+  } catch (e) {
+    // 网络错误，继续轮询
+  }
+}
+
+async function stopRenew() {
+  try {
+    await fetch("/api/renew/stop", { method: "POST" });
+  } catch (e) {}
+  if (renewPollTimer) { clearInterval(renewPollTimer); renewPollTimer = null; }
+  renewInProgress = false;
+  elSyncBtn.disabled = false;
+  elRenewStop.hidden = true;
+  elRenewScan.querySelector(".rm-qr-wrap").style.display = "";
+  setRenewStatus("已取消续期。", "info");
+  // 回到初始态
+  elRenewIntro.hidden = false;
+  elRenewScan.hidden = true;
+}
+
+function setRenewStatus(msg, cls) {
+  elRenewStatus.textContent = msg;
+  elRenewStatus.className = "rm-renew-status" + (cls ? " " + cls : "");
+}
+
+elRenewStart.addEventListener("click", () => startRenew());
+elRenewStop.addEventListener("click", () => stopRenew());
 
 // 静默刷新：同步成功后局部更新当前视图，不打断阅读。
 // 刷新群下拉计数 + 日期列表计数（保留展开态）+ 追加新消息到底部（不滚动）。
@@ -731,7 +917,7 @@ async function silentRefresh() {
   if (state.loadingNewer || !state.after) return;
   const myReq = state.reqId;
   try {
-    const data = await api(`/api/messages?gid=${state.gid}&after_ts=${state.after.ts}&limit=${LIMIT}`);
+    const data = await api(`/api/messages?gid=${state.gid}&after_ts=${state.after.ts}&limit=${LIMIT}${memberFilterQ()}`);
     if (myReq !== state.reqId) return;  // 用户已切走，丢弃
     if (!data.messages.length) {
       state.hasMoreNewer = false;
@@ -747,7 +933,7 @@ async function silentRefresh() {
   } catch (e) { /* 静默失败 */ }
 }
 
-// ---------- 自动同步（每 60 秒，默认开启）----------
+// ---------- 自动同步（每 60 秒，默认不开启）----------
 const autoRefreshCheck = $("auto-refresh-check");
 const autoRefreshCountdown = $("auto-refresh-countdown");
 let autoRefreshTimer = null;
@@ -814,5 +1000,4 @@ autoRefreshCheck.addEventListener("change", () => {
 });
 
 init();
-// 默认开启自动同步
-startAutoRefresh();
+// 默认不开启自动同步，由用户勾选触发
